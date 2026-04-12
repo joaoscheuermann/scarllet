@@ -1,0 +1,43 @@
+{
+  "name": "scarllet-tui",
+  "$schema": "../../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "sourceRoot": "packages/rust/scarllet-tui/src",
+  "targets": {
+    "build": {
+      "executor": "@monodon/rust:build",
+      "outputs": ["{options.target-dir}"],
+      "options": {
+        "target-dir": "dist/target/scarllet-tui"
+      }
+    },
+    "test": {
+      "cache": true,
+      "executor": "@monodon/rust:test",
+      "outputs": ["{options.target-dir}"],
+      "options": {
+        "target-dir": "dist/target/scarllet-tui"
+      },
+      "configurations": {
+        "production": {
+          "release": true
+        }
+      }
+    },
+    "lint": {
+      "cache": true,
+      "executor": "@monodon/rust:lint",
+      "outputs": ["{options.target-dir}"],
+      "options": {
+        "target-dir": "dist/target/scarllet-tui"
+      }
+    },
+    "run": {
+      "executor": "@monodon/rust:run",
+      "options": {
+        "target-dir": "dist/target/scarllet-tui"
+      }
+    }
+  },
+  "tags": []
+}

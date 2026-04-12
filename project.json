@@ -1,0 +1,16 @@
+{
+  "name": "scarllet",
+  "$schema": "node_modules/nx/schemas/project-schema.json",
+  "targets": {
+    "release": {
+      "executor": "nx:run-commands",
+      "options": {
+        "commands": [
+          "cargo build --release",
+          "powershell -ExecutionPolicy Bypass -File scripts/release.ps1"
+        ],
+        "parallel": false
+      }
+    }
+  }
+}

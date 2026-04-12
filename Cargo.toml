@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = []
+members = [
+  "packages/rust/scarllet-proto",
+  "packages/rust/scarllet-sdk",
+  "packages/rust/scarllet-core",
+  "packages/rust/scarllet-tui",
+  "packages/rust/scarllet-llm",
+  "packages/rust/agents/default",
+]
 
 [profile.release]
 lto = true

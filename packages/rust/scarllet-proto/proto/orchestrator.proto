@@ -1,0 +1,140 @@
+syntax = "proto3";
+
+package scarllet;
+
+service Orchestrator {
+  rpc Ping(PingRequest) returns (PingResponse);
+  rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
+  rpc GetToolRegistry(ToolRegistryQuery) returns (ToolRegistryResponse);
+  rpc GetActiveProvider(ActiveProviderQuery) returns (ActiveProviderResponse);
+  rpc InvokeTool(ToolInvocation) returns (ToolResult);
+  rpc SubmitTask(TaskSubmission) returns (TaskReceipt);
+  rpc CancelTask(CancelRequest) returns (CancelResponse);
+  rpc ReportProgress(ProgressReport) returns (Ack);
+  rpc GetAgentStatus(AgentStatusQuery) returns (AgentStatusResponse);
+  rpc AttachTui(stream TuiMessage) returns (stream CoreEvent);
+  rpc AgentStream(stream AgentMessage) returns (stream AgentTask);
+}
+
+message PingRequest {}
+message PingResponse { uint64 uptime_secs = 1; }
+
+message ListCommandsRequest {}
+message ListCommandsResponse { repeated CommandInfo commands = 1; }
+message CommandInfo {
+  string name = 1;
+  repeated string aliases = 2;
+  string description = 3;
+}
+
+message ToolRegistryQuery {}
+message ToolRegistryResponse { repeated ToolInfo tools = 1; }
+message ToolInfo {
+  string name = 1;
+  string description = 2;
+  string input_schema_json = 3;
+  uint64 timeout_ms = 4;
+}
+
+message ActiveProviderQuery {}
+message ActiveProviderResponse {
+  bool configured = 1;
+  string provider_name = 2;
+  string api_url = 3;
+  string api_key = 4;
+  string model = 5;
+}
+
+message ToolInvocation {
+  string tool_name = 1;
+  string input_json = 2;
+  uint64 snapshot_id = 3;
+}
+message ToolResult {
+  bool success = 1;
+  string output_json = 2;
+  string error_message = 3;
+  uint64 duration_ms = 4;
+}
+
+message TaskSubmission {
+  string agent_name = 1;
+  string task_description = 2;
+  string working_directory = 3;
+}
+message TaskReceipt {
+  string task_id = 1;
+  uint64 snapshot_id = 2;
+}
+
+message CancelRequest { string task_id = 1; }
+message CancelResponse { bool success = 1; }
+
+message ProgressReport {
+  string task_id = 1;
+  string status = 2;
+  string message = 3;
+}
+message Ack {}
+
+message AgentStatusQuery { string task_id = 1; }
+message AgentStatusResponse {
+  string task_id = 1;
+  string agent_name = 2;
+  string status = 3;
+  repeated string progress_log = 4;
+  string working_directory = 5;
+}
+
+// Bidirectional TUI streaming
+
+message TuiMessage {
+  oneof payload {
+    PromptMessage prompt = 1;
+  }
+}
+
+message PromptMessage {
+  string text = 1;
+  string working_directory = 2;
+}
+
+message CoreEvent {
+  oneof payload {
+    ConnectedEvent connected = 1;
+    AgentStartedEvent agent_started = 2;
+    AgentThinkingEvent agent_thinking = 3;
+    AgentResponseEvent agent_response = 4;
+    AgentErrorEvent agent_error = 5;
+    SystemEvent system = 6;
+  }
+}
+
+message ConnectedEvent { uint64 uptime_secs = 1; }
+message AgentStartedEvent { string task_id = 1; string agent_name = 2; }
+message AgentThinkingEvent { string task_id = 1; string agent_name = 2; string content = 3; }
+message AgentResponseEvent { string task_id = 1; string agent_name = 2; string content = 3; }
+message AgentErrorEvent { string task_id = 1; string agent_name = 2; string error = 3; }
+message SystemEvent { string message = 1; }
+
+// Bidirectional Agent streaming
+
+message AgentMessage {
+  oneof payload {
+    AgentRegister register = 1;
+    AgentProgressMsg progress = 2;
+    AgentResultMsg result = 3;
+    AgentFailure failure = 4;
+  }
+}
+
+message AgentRegister { string agent_name = 1; }
+message AgentProgressMsg { string task_id = 1; string content = 2; }
+message AgentResultMsg { string task_id = 1; string content = 2; }
+message AgentFailure { string task_id = 1; string error = 2; }
+
+message AgentTask {
+  string task_id = 1;
+  string prompt = 2;
+  string working_directory = 3;
+}
