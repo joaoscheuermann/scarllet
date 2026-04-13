@@ -1,119 +1,128 @@
-# Monorepo template (Nx)
+# Scarllet
 
-<a alt="Nx logo" href="https://nx.dev" target="_blank" rel="noreferrer"><img src="https://raw.githubusercontent.com/nrwl/nx/master/images/nx-logo.png" width="45"></a>
+A personal **Coding Agent AI Harness** for experimenting with harnesses, tooling, and customized agents.
 
-This repository is an **Nx workspace template**: a starting point you can **copy, fork, or use as the basis for new monorepos**. It is not a single product—treat it as boilerplate with opinionated plugin wiring so your team can add apps and libraries quickly across **TypeScript/JavaScript**, **Rust**, and **Python**.
+> **Not for production use.** This is an experimental prototyping playground. APIs, structure, and conventions may change without notice.
 
-## What this template already includes
+Scarllet is built to enable fast iteration on ideas around AI agent orchestration, tool integration, and terminal-based interfaces — without the overhead of production-grade concerns. If you want to try a new agent loop, swap an LLM provider, or wire up a custom tool, this architecture gets out of your way.
 
-| Area | Package / plugin | Role |
-|------|------------------|------|
-| **JavaScript & TS** | [`@nx/js`](https://nx.dev/nx-api/js) | Core JS/TS support, generators, and task patterns for Nx. |
-| **TypeScript** | [`@nx/js/typescript`](https://nx.dev/nx-api/js/documents/typescript-plugin) | Inferred TypeScript builds, typecheck, and `tsconfig` wiring (registered in `nx.json`). |
-| **Rust** | [`@monodon/rust`](https://github.com/cammisuli/monodon) | Rust crates in the workspace with Nx-aware targets (registered in `nx.json`). |
-| **Python** | [`@nxlv/python`](https://www.npmjs.com/package/@nxlv/python) | Python projects (e.g. uv-based layout), generators, and executors—dependency is **installed** so you can scaffold and run Python targets without adding the plugin yourself. |
+## Architecture
 
-TypeScript [project references](https://www.typescriptlang.org/docs/handbook/project-references.html) stay aligned with the Nx graph when you run builds or typecheck; you can also run `npx nx sync` (or `npx nx sync:check` in CI).
+The system is composed of six Rust crates inside an Nx monorepo, connected via gRPC:
 
-## Agent skills (`.agents/skills`)
+```mermaid
+flowchart TB
+  subgraph workspace ["Nx Monorepo (Rust via @monodon/rust)"]
+    proto["scarllet-proto\n(gRPC types, orchestrator.proto)"]
+    sdk["scarllet-sdk\n(config, manifest, lockfile)"]
+    core["scarllet-core\n(Orchestrator server)"]
+    tui["scarllet-tui\n(Terminal UI client)"]
+    llm["scarllet-llm\n(OpenAI-compatible HTTP client)"]
+    agent["default-agent\n(Reference agent binary)"]
 
-The template ships **personal agent skills**: Markdown playbooks under [`.agents/skills`](.agents/skills) that tools like Cursor can load to steer AI assistants toward consistent Nx workflows, monorepo hygiene, and a structured journal-based dev process. Each skill lives in its own folder with a `SKILL.md` (name and description in the file frontmatter). Below is what each one is for.
+    proto --> sdk
+    sdk --> core
+    sdk --> tui
+    proto --> agent
+    llm --> agent
+  end
 
-### Nx workspace and monorepo operations
-
-| Skill | What it does |
-|-------|----------------|
-| **`nx-workspace`** | Read-only exploration of the Nx workspace: list projects, inspect configuration and targets, understand dependencies, and debug failed `nx` commands before running tasks. |
-| **`nx-generate`** | Run Nx **generators** the right way (discover plugins, prefer `--no-interactive`, read generator behavior, match repo patterns, verify with lint/test/build). Use when scaffolding apps, libraries, or migrations. |
-| **`nx-run-tasks`** | How to **execute** Nx tasks: single-project runs, `run-many`, `affected`, inferred targets, and checking available targets (e.g. via `nx show project`). |
-| **`nx-plugins`** | **Discover and install** Nx plugins (`nx list`, `nx add <plugin>`) when you need new framework or stack support. |
-| **`nx-import`** | Bring **external repos** into the workspace with `nx import` while preserving history—strategies, directory layout, and version quirks (e.g. non-interactive flags). |
-| **`link-workspace-packages`** | Wire **workspace dependencies** across packages using the repo’s package manager (npm, pnpm, yarn, bun)—fix `@org/*` resolution and “cannot find module” without fake `tsconfig` path hacks. |
-| **`monitor-ci`** | **Watch Nx Cloud CI** pipelines, interpret runs, and coordinate self-healing / fix loops when you care about branch status and automated remediation (not a replacement for raw `gh`/`glab` for generic Git ops). |
-
-### Design, coding standards, and implementation
-
-| Skill | What it does |
-|-------|----------------|
-| **`architect`** | **Planning only**: architecture and refactor design for an Nx monorepo with journaling, explicit human gates, trade-offs, and effort decomposition—does not implement product code. |
-| **`coding-conventions`** | Shared **principles and rules** (SRP, OCP, DIP, ISP, KISS, DRY, early returns, functional style, DI) plus references for **@nxlv/python** and **@monodon/rust** scaffolding—load with architect or developer. |
-| **`developer`** | **Implements** work from a journal Effort (or an approved bug-fix plan): explore the repo, write code and tests, follow `coding-conventions`, and hand off verification—does not mutate Effort status or journal metadata itself. |
-| **`tester`** | **Verifies** changes against Effort or bug criteria using Nx targets, builds, tests, and evidence-backed pass/fail reporting; does not own arbitrary product edits (delegates fixes back to developer when needed). |
-
-### Journal workflow (optional structured delivery)
-
-These skills assume file-backed journals under `.journal/` (paths, slugs, efforts, bugs, decisions). They chain together for slice-by-slice delivery after architecture is approved.
-
-| Skill | What it does |
-|-------|----------------|
-| **`journal-manager`** | **CRUD for journal files**: create/update entries, efforts, bug reports, decision logs; resolve `<entry_dir>` from a slug; the low-level file protocol other skills build on. |
-| **`decomposer`** | Splits an approved **`## Architecture`** section in `ticket.md` into **ordered Effort** files—vertical slices with runnable outcomes; does not implement code. |
-| **`effort-executor`** | Runs efforts **in sequence**: status lifecycle, delegates each effort to **developer**, captures change summaries and decision logs; does not write application code itself. |
-
-### Debugging workflow
-
-| Skill | What it does |
-|-------|----------------|
-| **`debug-coordinator`** | **Orchestrates** bug workflows: journal/bug setup, triage, loops with **debugger** → human-approved **developer** fixes → **tester** verification and documentation; does not patch product code directly. |
-| **`debugger`** | **Hypothesis-driven investigation**: context, exploration, falsifiable hypotheses, diagnostics, structured findings—returns outcomes like root cause vs. needs-more-info; does not fix code or talk to the user without a coordinator. |
-
----
-
-If you copy this template, keep or trim `.agents/skills` to match how your team uses AI assistants; the skills are documentation and process, not runtime dependencies.
-
-## Using this template for a new project
-
-1. **Copy the repo** (fork, duplicate, or `git clone` into a new directory) and rename it to match your product or organization.
-2. Update **root metadata**: `package.json` name (e.g. `@your-org/source`), license, and workspace paths if you change `packages/*`.
-3. **Install dependencies**: `npm install` (this workspace uses npm workspaces under `packages/*`).
-4. **Replace placeholders** in any generated examples (import paths like `@my-org/...`, project names).
-5. **Add projects** with Nx generators, e.g. `@nx/js:library`, `@monodon/rust` generators, `@nxlv/python` generators—see each plugin’s docs for exact commands.
-
-Explore the workspace graph anytime:
-
-```sh
-npx nx graph
+  user(["User"]) --> tui
+  tui -- "gRPC\nAttachTui stream" --> core
+  core -- "spawn / AgentStream" --> agent
+  agent -- "HTTP / SSE" --> llmAPI(["LLM API\n(OpenAI-compatible)"])
 ```
 
-## Everyday commands
+| Crate | Path | Role |
+|-------|------|------|
+| `scarllet-proto` | `packages/rust/scarllet-proto` | Protobuf definitions and tonic codegen for the `Orchestrator` gRPC service |
+| `scarllet-sdk` | `packages/rust/scarllet-sdk` | Shared types: config loading (`config.json`), module manifests, lockfile for core address discovery |
+| `scarllet-core` | `packages/rust/scarllet-core` | Orchestrator binary — gRPC server, module/agent registries, task manager, filesystem watcher for hot-reloading plugins |
+| `scarllet-tui` | `packages/rust/scarllet-tui` | Terminal UI (ratatui + crossterm) — chat interface that streams agent responses with markdown rendering |
+| `scarllet-llm` | `packages/rust/scarllet-llm` | Standalone LLM client library — `LlmProvider` async trait, OpenAI-compatible HTTP + SSE streaming |
+| `default-agent` | `packages/rust/agents/default` | Reference agent — connects to core via `AgentStream`, fetches provider config, streams LLM responses back |
 
-Run a target for a project:
+## Runtime Layout
 
-```sh
-npx nx <target> <project-name>
+When you run `npx nx run scarllet:release`, Cargo builds all crates in release mode and the release script assembles them into a flat `release/` folder:
+
+```
+release/
+  core.exe            # scarllet-core orchestrator
+  tui.exe             # scarllet-tui terminal client
+  agents/
+    default.exe       # default agent
+  tools/              # (empty, place tool binaries here)
+  commands/           # (empty, place command binaries here)
 ```
 
-Example for a publishable JS/TS library (adjust names to your org):
+### Configuration (`config.json`)
+
+Core loads its configuration from `<OS config dir>/scarllet/config.json` (e.g. `%APPDATA%/scarllet/config.json` on Windows). The file defines LLM providers — each with an API URL, API key, model list, and optional settings like reasoning effort or extra body parameters. One provider is marked as `active_provider`.
+
+If the file does not exist, core creates it with empty defaults. Core also watches `config.json` for changes and hot-reloads it — any edits are picked up immediately and broadcast to all connected TUI sessions as a `ProviderInfo` event.
+
+### Lockfile (`core.lock`)
+
+When core starts, it binds to a random local port and writes a `core.lock` file next to `config.json` (i.e. `<OS config dir>/scarllet/core.lock`). This file contains the process PID, bound address, and start timestamp. The TUI reads `core.lock` to discover which address to connect to. When core shuts down, it removes the lockfile.
+
+### Module Discovery
+
+Core watches two sets of `commands/`, `tools/`, and `agents/` directories for plugin binaries:
+
+1. **Local** — sibling directories next to the `core.exe` binary (i.e. inside `release/`).
+2. **User** — under `<OS config dir>/scarllet/` (e.g. `%APPDATA%/scarllet/agents/`).
+
+User directories are scanned after local ones, so user-placed modules can override shipped defaults. For each file found (or created/modified at runtime), core runs `<binary> --manifest` and parses the JSON output as a `ModuleManifest` with fields like `name`, `kind` (command / tool / agent), `version`, `description`, and optional `input_schema`, `timeout_ms`, `capabilities`, and `aliases`. If the probe succeeds, the module is registered; if a file is deleted, it is deregistered.
+
+## Key Architectural Patterns
+
+- **gRPC boundary** — All inter-process communication goes through `orchestrator.proto`. Core, TUI, and agents are separate binaries that speak a single well-defined protocol.
+- **Plugin model** — Tools, commands, and agents are standalone executables discovered via `--manifest` JSON output. Core watches filesystem directories and hot-reloads new modules as they appear.
+- **Process isolation** — Agents and tools run as child processes. Core communicates with tools via stdin/stdout JSON and with agents via bidirectional gRPC streams.
+- **LLM abstraction** — The `LlmProvider` async trait in `scarllet-llm` decouples agent logic from any specific provider. Currently ships with a single `OpenAiProvider` (OpenAI-compatible HTTP + SSE), but the trait is designed for swapping or stacking providers.
+- **Broadcast to UIs** — Core multiplexes events (agent started, thinking, streaming response, errors) to all attached TUI sessions, so multiple terminals can observe the same agent run.
+
+## How Agents Work
+
+1. Core watches `agents/` directories, probes each binary with `--manifest`, and registers it in the `AgentRegistry`.
+2. The user types a prompt in the TUI. The TUI sends it over the `AttachTui` gRPC bidirectional stream to core.
+3. Core selects an agent, creates a task, and broadcasts `AgentStarted` to all attached TUIs.
+4. Core delivers an `AgentTask` to the agent — either over an already-open `AgentStream` or by spawning the agent binary and waiting for it to connect.
+5. The agent calls `GetActiveProvider` to fetch LLM credentials and model settings, then uses `scarllet-llm` to stream the model response. It sends `Progress`, `Result`, or `Failure` messages back on the stream.
+6. Core maps those messages to `CoreEvent`s and streams them to every attached TUI for display.
+
+## Fast Prototyping
+
+The architecture is designed to minimize friction when experimenting:
+
+- **New agent** — Write a Rust binary that prints a `--manifest` JSON and connects to the core `AgentStream`. Drop it in the `agents/` directory and core picks it up automatically.
+- **New tool** — Even simpler: a binary that reads JSON from stdin and writes JSON to stdout. Place it in the `tools/` directory.
+- **Hot-reload** — The filesystem watcher detects new or changed binaries and re-probes manifests without restarting core.
+- **Independent evolution** — TUI connects to core over gRPC, so UI changes never require touching orchestration logic (and vice versa).
+
+## Tech Stack
+
+- **Rust** (edition 2021) inside an **Nx** monorepo managed by [`@monodon/rust`](https://github.com/cammisuli/monodon)
+- **tonic / prost** — gRPC server and client codegen
+- **tokio** — async runtime (full feature set)
+- **ratatui + crossterm** — terminal UI rendering
+- **reqwest** — HTTP client for LLM API calls
+- **notify** — cross-platform filesystem watching for plugin discovery
+
+## Getting Started
 
 ```sh
-npx nx g @nx/js:lib packages/pkg1 --publishable --importPath=@your-org/pkg1
-npx nx build pkg1
+npm install
+npx nx run scarllet:release
 ```
 
-Keep TS references in sync manually if needed:
+This builds all crates and assembles the `release/` folder. Then:
 
-```sh
-npx nx sync
-```
+1. Edit `<OS config dir>/scarllet/config.json` to set up at least one LLM provider (API URL, key, model, and mark it as `active_provider`).
+2. Run `release/core.exe` — it starts the orchestrator, writes `core.lock`, and begins watching for modules.
+3. Run `release/tui.exe` — it reads `core.lock`, connects to core, and opens the chat interface.
 
-Version and release (when configured):
+## Disclaimer
 
-```sh
-npx nx release
-```
-
-Use `--dry-run` with `nx release` to preview.
-
-## Tooling & CI
-
-- **Nx Console** — [Editor integration](https://nx.dev/getting-started/editor-setup) for tasks and generators in VS Code and IntelliJ.
-- **CI** — Generate a workflow for non–GitHub Actions providers: `npx nx g ci-workflow`. For GitHub Actions, follow [Nx CI docs](https://nx.dev/ci/intro/ci-with-nx).
-
-This template sets `neverConnectToCloud` in `nx.json`; enable [Nx Cloud](https://nx.dev/ci/intro/why-nx-cloud) in your fork if you want remote caching and distributed CI.
-
-## Learn more
-
-- [Nx docs](https://nx.dev)
-- [Nx plugins](https://nx.dev/concepts/nx-plugins)
-- [Managing releases](https://nx.dev/features/manage-releases)
-- [Community](https://go.nx.dev/community)
+This project is a **personal experiment**. It is not intended for production use. There are no stability guarantees — APIs, data formats, and project structure may change at any time.
