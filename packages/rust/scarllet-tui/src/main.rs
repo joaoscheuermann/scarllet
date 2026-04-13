@@ -1,9 +1,12 @@
+mod content_parser;
+
 use std::io;
 use std::time::Duration;
 
+use content_parser::{parse_blocks, ContentBlock};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 use ratatui::Frame;
@@ -14,6 +17,8 @@ use scarllet_proto::proto::*;
 use scarllet_sdk::lockfile;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+
+const TYPEWRITER_CHARS_PER_TICK: usize = 30;
 
 #[derive(Clone, PartialEq)]
 enum Focus {
@@ -29,6 +34,7 @@ enum ChatEntry {
         name: String,
         task_id: String,
         content: String,
+        visible_len: usize,
         done: bool,
     },
     System {
@@ -73,6 +79,34 @@ impl App {
         if let Screen::Connecting { ref mut tick } = self.screen {
             *tick += 1;
         }
+        for entry in &mut self.messages {
+            if let ChatEntry::Agent {
+                content,
+                visible_len,
+                done,
+                ..
+            } = entry
+            {
+                if *visible_len < content.len() {
+                    let remaining = &content[*visible_len..];
+                    let advance: usize = remaining
+                        .chars()
+                        .take(TYPEWRITER_CHARS_PER_TICK)
+                        .map(|c| c.len_utf8())
+                        .sum();
+                    *visible_len += advance;
+                }
+                if *done {
+                    *visible_len = content.len();
+                }
+            }
+        }
+    }
+
+    fn is_streaming(&self) -> bool {
+        self.messages.iter().any(
+            |e| matches!(e, ChatEntry::Agent { done: false, .. }),
+        )
     }
 
     fn push_message(&mut self, entry: ChatEntry) {
@@ -118,7 +152,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         terminal.draw(|f| draw(f, &app))?;
 
-        if event::poll(Duration::from_millis(200))? {
+        let poll_ms = if app.is_streaming() { 50 } else { 200 };
+        if event::poll(Duration::from_millis(poll_ms))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != crossterm::event::KeyEventKind::Press {
                     continue;
@@ -210,6 +245,7 @@ fn handle_core_event(app: &mut App, event: CoreEvent) {
                 name: e.agent_name,
                 task_id: e.task_id,
                 content: String::new(),
+                visible_len: 0,
                 done: false,
             });
         }
@@ -222,8 +258,15 @@ fn handle_core_event(app: &mut App, event: CoreEvent) {
         }
         core_event::Payload::AgentResponse(e) => {
             if let Some(entry) = find_agent_entry(&mut app.messages, &e.task_id) {
-                if let ChatEntry::Agent { content, done, .. } = entry {
+                if let ChatEntry::Agent {
+                    content,
+                    visible_len,
+                    done,
+                    ..
+                } = entry
+                {
                     *content = e.content;
+                    *visible_len = content.len();
                     *done = true;
                 }
             }
@@ -354,33 +397,51 @@ fn draw_history(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 name,
                 task_id,
                 content,
+                visible_len,
                 done,
             } => {
                 let id_short = &task_id[..8.min(task_id.len())];
                 let label = format!("{name} ({id_short}): ");
-                if *done {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            label,
-                            Style::default()
-                                .fg(Color::Green)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(content.as_str(), Style::default().fg(Color::White)),
-                    ]));
-                } else {
+                lines.push(Line::from(Span::styled(
+                    label,
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )));
+
+                let visible = &content[..*visible_len];
+                let blocks = parse_blocks(visible);
+                for (bi, blk) in blocks.iter().enumerate() {
+                    if bi > 0 {
+                        lines.push(Line::raw(""));
+                    }
+                    match blk {
+                        ContentBlock::Thought(text) => {
+                            let md = tui_markdown::from_str(text);
+                            for line in md.lines {
+                                let dimmed_spans: Vec<Span> = line
+                                    .spans
+                                    .into_iter()
+                                    .map(|s| s.dark_gray())
+                                    .collect();
+                                lines.push(Line::from(dimmed_spans));
+                            }
+                        }
+                        ContentBlock::Response(text) => {
+                            let md = tui_markdown::from_str(text);
+                            for line in md.lines {
+                                lines.push(line);
+                            }
+                        }
+                    }
+                }
+
+                if !done {
                     let dots = thinking_dots(app.tick);
-                    let suffix = format!("thinking{dots}");
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            label,
-                            Style::default()
-                                .fg(Color::Green)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(content.as_str(), Style::default().fg(Color::White)),
-                        Span::styled(suffix, Style::default().fg(Color::Yellow)),
-                    ]));
+                    lines.push(Line::styled(
+                        format!("Working{dots}"),
+                        Style::default().fg(Color::Yellow),
+                    ));
                 }
             }
             ChatEntry::System { text } => {
@@ -392,10 +453,18 @@ fn draw_history(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         }
     }
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false })
-        .scroll((app.scroll_offset, 0));
+    let inner = block.inner(area);
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let total_lines = paragraph.line_count(inner.width) as u16;
+    let viewport_height = inner.height;
+
+    let scroll_y = if total_lines > viewport_height {
+        (total_lines - viewport_height).saturating_sub(app.scroll_offset)
+    } else {
+        0
+    };
+
+    let paragraph = paragraph.block(block).scroll((scroll_y, 0));
     frame.render_widget(paragraph, area);
 }
 

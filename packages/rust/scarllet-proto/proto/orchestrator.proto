@@ -43,6 +43,8 @@ message ActiveProviderResponse {
   string api_url = 3;
   string api_key = 4;
   string model = 5;
+  string reasoning_effort = 6;
+  string extra_body_json = 7;
 }
 
 message ToolInvocation {

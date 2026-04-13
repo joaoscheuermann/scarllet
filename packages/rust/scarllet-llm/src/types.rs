@@ -1,3 +1,6 @@
+use std::pin::Pin;
+
+use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8,6 +11,10 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub extra_body: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +46,16 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct ChatStreamEvent {
+    pub delta: String,
+    pub finish_reason: Option<String>,
+}
+
+pub type ChatStream = Pin<Box<dyn Stream<Item = Result<ChatStreamEvent, crate::LlmError>> + Send>>;
+
 #[async_trait::async_trait]
 pub trait LlmProvider: Send + Sync {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, crate::LlmError>;
+    async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, crate::LlmError>;
 }

@@ -102,6 +102,12 @@ impl Orchestrator for OrchestratorService {
                 api_url: provider.api_url.clone(),
                 api_key: provider.api_key.clone(),
                 model: provider.active_model.clone(),
+                reasoning_effort: provider.reasoning_effort.clone().unwrap_or_default(),
+                extra_body_json: provider
+                    .extra_body
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
             })),
             None => Ok(Response::new(ActiveProviderResponse {
                 configured: false,

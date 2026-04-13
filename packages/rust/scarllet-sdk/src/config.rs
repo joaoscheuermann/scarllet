@@ -19,6 +19,10 @@ pub struct Provider {
     pub models: Vec<String>,
     #[serde(default)]
     pub active_model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<serde_json::Value>,
 }
 
 impl ScarlletConfig {
@@ -77,6 +81,8 @@ mod tests {
                 api_url: "https://openrouter.ai/api/v1".into(),
                 models: vec!["gpt-4o".into(), "claude-sonnet".into()],
                 active_model: "gpt-4o".into(),
+                reasoning_effort: Some("high".into()),
+                extra_body: None,
             }],
         };
         let json = serde_json::to_string(&config).unwrap();
@@ -103,6 +109,8 @@ mod tests {
                 api_url: "http://localhost:11434/v1".into(),
                 models: vec!["llama3".into()],
                 active_model: "llama3".into(),
+                reasoning_effort: None,
+                extra_body: None,
             }],
         };
         let p = config.active_provider().unwrap();
