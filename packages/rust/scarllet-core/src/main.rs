@@ -242,6 +242,9 @@ impl Orchestrator for OrchestratorService {
         };
         let _ = tx.try_send(Ok(connected));
 
+        let provider_info = build_provider_info_event(&*self.config.read().await);
+        let _ = tx.try_send(Ok(provider_info));
+
         let mut incoming = request.into_inner();
         let session_registry = Arc::clone(&self.session_registry);
         let agent_registry = Arc::clone(&self.agent_registry);
@@ -375,6 +378,25 @@ impl Orchestrator for OrchestratorService {
         });
 
         Ok(Response::new(ReceiverStream::new(task_rx)))
+    }
+}
+
+fn build_provider_info_event(cfg: &ScarlletConfig) -> CoreEvent {
+    match cfg.active_provider() {
+        Some(provider) => CoreEvent {
+            payload: Some(core_event::Payload::ProviderInfo(ProviderInfoEvent {
+                provider_name: provider.name.clone(),
+                model: provider.active_model.clone(),
+                reasoning_effort: provider.reasoning_effort.clone().unwrap_or_default(),
+            })),
+        },
+        None => CoreEvent {
+            payload: Some(core_event::Payload::ProviderInfo(ProviderInfoEvent {
+                provider_name: String::new(),
+                model: String::new(),
+                reasoning_effort: String::new(),
+            })),
+        },
     }
 }
 
@@ -561,8 +583,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let watcher_config = Arc::clone(&config);
+    let watcher_sessions = Arc::clone(&session_registry);
     tokio::spawn(async move {
-        watcher::watch_config(watcher_config).await;
+        watcher::watch_config(watcher_config, watcher_sessions).await;
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse()?;

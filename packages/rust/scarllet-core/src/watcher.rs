@@ -1,5 +1,8 @@
 use crate::registry::ModuleRegistry;
+use crate::sessions::TuiSessionRegistry;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
+use scarllet_proto::proto::core_event;
+use scarllet_proto::proto::{CoreEvent, ProviderInfoEvent};
 use scarllet_sdk::config::{self, ScarlletConfig};
 use scarllet_sdk::manifest::ModuleManifest;
 use std::path::{Path, PathBuf};
@@ -140,7 +143,10 @@ async fn probe_manifest(path: &Path) -> Option<ModuleManifest> {
     serde_json::from_slice(&output.stdout).ok()
 }
 
-pub async fn watch_config(config: Arc<RwLock<ScarlletConfig>>) {
+pub async fn watch_config(
+    config: Arc<RwLock<ScarlletConfig>>,
+    session_registry: Arc<RwLock<TuiSessionRegistry>>,
+) {
     let config_file = config::config_path();
     let Some(config_dir) = config_file.parent() else {
         warn!("Cannot determine config directory");
@@ -195,6 +201,26 @@ pub async fn watch_config(config: Arc<RwLock<ScarlletConfig>>) {
                     "Config reloaded: {} provider(s), active='{active}'",
                     provider_count
                 );
+
+                let cfg = config.read().await;
+                let event = match cfg.active_provider() {
+                    Some(p) => CoreEvent {
+                        payload: Some(core_event::Payload::ProviderInfo(ProviderInfoEvent {
+                            provider_name: p.name.clone(),
+                            model: p.active_model.clone(),
+                            reasoning_effort: p.reasoning_effort.clone().unwrap_or_default(),
+                        })),
+                    },
+                    None => CoreEvent {
+                        payload: Some(core_event::Payload::ProviderInfo(ProviderInfoEvent {
+                            provider_name: String::new(),
+                            model: String::new(),
+                            reasoning_effort: String::new(),
+                        })),
+                    },
+                };
+                drop(cfg);
+                session_registry.read().await.broadcast(event);
             }
             Err(e) => {
                 warn!("Failed to reload config: {e}");

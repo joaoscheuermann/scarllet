@@ -109,6 +109,7 @@ message CoreEvent {
     AgentResponseEvent agent_response = 4;
     AgentErrorEvent agent_error = 5;
     SystemEvent system = 6;
+    ProviderInfoEvent provider_info = 7;
   }
 }
 
@@ -118,6 +119,11 @@ message AgentThinkingEvent { string task_id = 1; string agent_name = 2; string c
 message AgentResponseEvent { string task_id = 1; string agent_name = 2; string content = 3; }
 message AgentErrorEvent { string task_id = 1; string agent_name = 2; string error = 3; }
 message SystemEvent { string message = 1; }
+message ProviderInfoEvent {
+  string provider_name = 1;
+  string model = 2;
+  string reasoning_effort = 3;
+}
 
 // Bidirectional Agent streaming
 
