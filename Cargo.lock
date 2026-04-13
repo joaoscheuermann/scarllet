@@ -2599,6 +2599,7 @@ name = "scarllet-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "dirs",
  "ratatui",
  "scarllet-proto",
  "scarllet-sdk",
