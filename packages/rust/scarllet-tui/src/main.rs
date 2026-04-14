@@ -1,4 +1,5 @@
 mod git_info;
+mod input;
 
 use std::collections::HashMap;
 use std::io;
@@ -86,10 +87,10 @@ struct App {
     route: Route,
     messages: Vec<ChatEntry>,
     tool_calls: HashMap<String, ToolCallData>,
-    input: String,
-    cursor_pos: usize,
+    input_state: input::InputState,
     input_locked: bool,
     focus: Focus,
+    wrap_width: u16,
     scroll_offset: u16,
     max_scroll: u16,
     tick: u64,
@@ -126,10 +127,10 @@ impl App {
             route: Route::Connecting { tick: 0 },
             messages: Vec::new(),
             tool_calls: HashMap::new(),
-            input: String::new(),
-            cursor_pos: 0,
+            input_state: input::InputState::new(),
             input_locked: false,
             focus: Focus::Input,
+            wrap_width: 80,
             scroll_offset: 0,
             max_scroll: 0,
             tick: 0,
@@ -148,18 +149,6 @@ impl App {
             total_tokens: 0,
             context_window: 0,
         }
-    }
-
-    fn char_count(&self) -> usize {
-        self.input.chars().count()
-    }
-
-    fn byte_offset_at(&self, char_pos: usize) -> usize {
-        self.input
-            .char_indices()
-            .nth(char_pos)
-            .map(|(i, _)| i)
-            .unwrap_or(self.input.len())
     }
 
     fn refresh_env(&mut self) {
@@ -290,9 +279,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn insert_text_at_cursor(app: &mut App, text: &str) {
-    let byte_pos = app.byte_offset_at(app.cursor_pos);
-    app.input.insert_str(byte_pos, text);
-    app.cursor_pos += text.chars().count();
+    app.input_state.insert_str(text);
 }
 
 fn handle_paste(app: &mut App, text: &str) {
@@ -303,24 +290,20 @@ fn handle_paste(app: &mut App, text: &str) {
         return;
     }
     let cleaned = text.replace("\r\n", "\n").replace('\r', "\n");
-    let trimmed = cleaned.trim_end();
-    if !trimmed.is_empty() {
-        insert_text_at_cursor(app, trimmed);
+    if !cleaned.is_empty() {
+        insert_text_at_cursor(app, &cleaned);
     }
 }
 
 fn find_running_task_id(messages: &[ChatEntry]) -> Option<String> {
-    messages
-        .iter()
-        .rev()
-        .find_map(|e| match e {
-            ChatEntry::Agent {
-                task_id,
-                done: false,
-                ..
-            } => Some(task_id.clone()),
-            _ => None,
-        })
+    messages.iter().rev().find_map(|e| match e {
+        ChatEntry::Agent {
+            task_id,
+            done: false,
+            ..
+        } => Some(task_id.clone()),
+        _ => None,
+    })
 }
 
 fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
@@ -335,9 +318,7 @@ fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     if key.code == KeyCode::Esc && app.is_streaming() {
         if let Some(task_id) = find_running_task_id(&app.messages) {
             let msg = TuiMessage {
-                payload: Some(tui_message::Payload::Cancel(CancelPrompt {
-                    task_id,
-                })),
+                payload: Some(tui_message::Payload::Cancel(CancelPrompt { task_id })),
             };
             let _ = app.message_tx.try_send(msg);
         }
@@ -345,22 +326,12 @@ fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     }
 
     let input_editable = app.focus == Focus::Input && !app.input_locked;
+    let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-    match key.code {
-        KeyCode::Tab => {
-            app.focus = match app.focus {
-                Focus::Input => Focus::History,
-                Focus::History => Focus::Input,
-            };
-        }
-        KeyCode::Enter
-            if input_editable && (key.modifiers.contains(KeyModifiers::SHIFT) || has_ctrl) =>
-        {
-            insert_text_at_cursor(app, "\n");
-        }
-        KeyCode::Enter if input_editable => {
-            let trimmed = app.input.trim().to_string();
+    if input_editable {
+        if key.code == KeyCode::Enter && !has_shift && !has_ctrl {
+            let trimmed = app.input_state.text().trim().to_string();
             if trimmed.eq_ignore_ascii_case("exit") {
                 return true;
             }
@@ -369,8 +340,7 @@ fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 app.push_message(ChatEntry::User {
                     text: trimmed.clone(),
                 });
-                app.input.clear();
-                app.cursor_pos = 0;
+                app.input_state.set_text(String::new());
 
                 let msg = TuiMessage {
                     payload: Some(tui_message::Payload::Prompt(PromptMessage {
@@ -386,48 +356,36 @@ fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                     });
                 }
             }
-        }
-        KeyCode::Char(c) if input_editable && !has_ctrl => {
-            let byte_pos = app.byte_offset_at(app.cursor_pos);
-            app.input.insert(byte_pos, c);
-            app.cursor_pos += 1;
-        }
-        KeyCode::Backspace if input_editable => {
-            if app.cursor_pos > 0 {
-                app.cursor_pos -= 1;
-                let byte_pos = app.byte_offset_at(app.cursor_pos);
-                app.input.remove(byte_pos);
+            return false;
+        } else if key.code == KeyCode::Enter && (has_shift || has_ctrl) {
+            app.input_state.insert_char('\n');
+            return false;
+        } else if key.code == KeyCode::Tab {
+            app.input_state.insert_str("  ");
+            return false;
+        } else if key.code == KeyCode::PageUp {
+            let max = app.max_scroll;
+            if app.scroll_offset < max {
+                app.scroll_offset += 1;
             }
+            return false;
+        } else if key.code == KeyCode::PageDown {
+            app.scroll_offset = app.scroll_offset.saturating_sub(1);
+            return false;
         }
-        KeyCode::Delete if input_editable => {
-            if app.cursor_pos < app.char_count() {
-                let byte_pos = app.byte_offset_at(app.cursor_pos);
-                app.input.remove(byte_pos);
+
+        app.input_state.handle_key_event(key, app.wrap_width);
+    } else {
+        if key.code == KeyCode::Up {
+            let max = app.max_scroll;
+            if app.scroll_offset < max {
+                app.scroll_offset += 1;
             }
-        }
-        KeyCode::Left if input_editable => {
-            app.cursor_pos = app.cursor_pos.saturating_sub(1);
-        }
-        KeyCode::Right if input_editable => {
-            let max = app.char_count();
-            if app.cursor_pos < max {
-                app.cursor_pos += 1;
-            }
-        }
-        KeyCode::Home if input_editable => {
-            app.cursor_pos = 0;
-        }
-        KeyCode::End if input_editable => {
-            app.cursor_pos = app.char_count();
-        }
-        KeyCode::Up if app.focus == Focus::History => {
-            app.scroll_offset = app.scroll_offset.saturating_add(1);
-        }
-        KeyCode::Down if app.focus == Focus::History => {
+        } else if key.code == KeyCode::Down {
             app.scroll_offset = app.scroll_offset.saturating_sub(1);
         }
-        _ => {}
     }
+
     false
 }
 
@@ -533,10 +491,9 @@ fn handle_core_event(app: &mut App, event: CoreEvent) {
             }
             let secs = e.timestamp_ms / 1000;
             let millis = e.timestamp_ms % 1000;
-            let naive =
-                chrono::DateTime::from_timestamp(secs as i64, (millis * 1_000_000) as u32)
-                    .map(|dt| dt.format("%H:%M:%S%.3f").to_string())
-                    .unwrap_or_else(|| format!("{}ms", e.timestamp_ms));
+            let naive = chrono::DateTime::from_timestamp(secs as i64, (millis * 1_000_000) as u32)
+                .map(|dt| dt.format("%H:%M:%S%.3f").to_string())
+                .unwrap_or_else(|| format!("{}ms", e.timestamp_ms));
 
             app.push_message(ChatEntry::Debug {
                 source: e.source,
@@ -601,24 +558,13 @@ fn draw_connecting(frame: &mut Frame, tick: u64) {
 
 const INPUT_PREFIX_WIDTH: u16 = 2;
 
-fn compute_input_height(input: &str, available_width: u16, max_height: u16) -> u16 {
+fn compute_input_height(app: &input::InputState, available_width: u16, max_height: u16) -> u16 {
     if available_width == 0 {
         return 1;
     }
-
     let input_col_width = available_width.saturating_sub(INPUT_PREFIX_WIDTH).max(1);
-
-    let mut line_count: u16 = 0;
-
-    for line in input.split('\n') {
-        let line_len = line.chars().count() as u16;
-        let wrapped = line_len.div_ceil(input_col_width).max(1);
-        line_count += wrapped;
-    }
-
-    line_count = line_count.max(1);
-
-    line_count.min(max_height) - 2
+    let line_count = app.visual_lines(input_col_width).len() as u16;
+    line_count.max(1).min(max_height)
 }
 
 fn focused_border_style(focused: bool) -> Style {
@@ -631,15 +577,14 @@ fn focused_border_style(focused: bool) -> Style {
 
 fn draw_chat(frame: &mut Frame, app: &mut App) {
     let total_height = frame.area().height;
-    let max_input_lines = (total_height as u32 * 35 / 100).max(1) as u16;
-    let border_h = 2u16;
+    let max_input_lines = (total_height as u32 * 30 / 100).max(1) as u16; // 30% of screen as per spec
     let input_inner_width = frame.area().width.saturating_sub(2 + 1);
-    let input_lines = compute_input_height(&app.input, input_inner_width, max_input_lines);
+    let input_lines = compute_input_height(&app.input_state, input_inner_width, max_input_lines);
 
     let [history_area, _, input_area, _, status_area] = Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(1),
-        Constraint::Length(input_lines + border_h),
+        Constraint::Length(input_lines),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
@@ -747,10 +692,7 @@ fn prepend_border<'a>(
         } else {
             for chunk in plain_chars.chunks(content_width) {
                 let text: String = chunk.iter().collect();
-                out.push(Line::from(vec![
-                    border.clone(),
-                    Span::styled(text, style),
-                ]));
+                out.push(Line::from(vec![border.clone(), Span::styled(text, style)]));
             }
         }
     }
@@ -836,10 +778,7 @@ fn draw_history(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
                             let visible_end = byte_offset_for_chars(text, take);
                             let visible = &text[..visible_end];
                             chars_budget -= take;
-                            let border = Span::styled(
-                                "│ ",
-                                Style::default().fg(Color::DarkGray),
-                            );
+                            let border = Span::styled("│ ", Style::default().fg(Color::DarkGray));
                             let content_w = inner.width.saturating_sub(2) as usize;
                             let md = tui_markdown::from_str(visible);
                             let dimmed: Vec<Line> = md
@@ -937,7 +876,7 @@ fn draw_history(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     }
 }
 
-fn draw_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn draw_input(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let block = Block::default()
         .borders(Borders::LEFT)
         .border_style(focused_border_style(app.focus == Focus::Input))
@@ -955,59 +894,81 @@ fn draw_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             "Waiting for agent...",
             Style::default().fg(Color::DarkGray),
         ));
-
         frame.render_widget(paragraph, input_col);
-
         return;
     }
 
     let prefix = Paragraph::new(Line::styled("> ", Style::default().fg(Color::White)));
     frame.render_widget(prefix, prefix_area);
 
-    let input_lines: Vec<&str> = app.input.split('\n').collect();
-    let wrap_width = input_col.width.max(1) as usize;
+    let w = input_col.width.max(1);
+    app.wrap_width = w;
+
+    let visual_lines = app.input_state.visual_lines(w);
+    let visible_rows = input_col.height;
+
+    // Adjust scrolling
+    let (_, cursor_row) = app.input_state.cursor_visual_position(w);
+    if cursor_row < app.input_state.vertical_scroll {
+        app.input_state.vertical_scroll = cursor_row;
+    }
+    if cursor_row >= app.input_state.vertical_scroll + visible_rows {
+        app.input_state.vertical_scroll = cursor_row - visible_rows + 1;
+    }
+
+    let start = app.input_state.vertical_scroll as usize;
+    let end = (start + visible_rows as usize).min(visual_lines.len());
+
     let mut display_lines: Vec<Line> = Vec::new();
-    for line in &input_lines {
-        if line.is_empty() {
-            display_lines.push(Line::raw(""));
-        } else {
-            let chars: Vec<char> = line.chars().collect();
-            for chunk in chars.chunks(wrap_width) {
-                display_lines.push(Line::raw(chunk.iter().collect::<String>()));
+    let sel_range = app.input_state.selection_range();
+
+    for (_, vl) in visual_lines[start..end].iter().enumerate() {
+        let line_text = &app.input_state.text()[vl.byte_start..vl.byte_end];
+
+        if let Some((sel_start, sel_end)) = sel_range {
+            let mut spans = Vec::new();
+
+            for (g_idx, g) in
+                unicode_segmentation::UnicodeSegmentation::grapheme_indices(line_text, true)
+            {
+                let absolute_byte = vl.byte_start + g_idx;
+                let is_selected = absolute_byte >= sel_start && absolute_byte < sel_end;
+                let style = if is_selected {
+                    Style::default().bg(Color::Rgb(60, 60, 80))
+                } else {
+                    Style::default()
+                };
+                spans.push(Span::styled(g.to_string(), style));
             }
+            display_lines.push(Line::from(spans));
+        } else {
+            display_lines.push(Line::raw(line_text.to_string()));
         }
     }
+
     let paragraph = Paragraph::new(display_lines);
     frame.render_widget(paragraph, input_col);
 
     if app.focus == Focus::Input {
-        let wrap_width = input_col.width.max(1);
-        let mut chars_remaining = app.cursor_pos;
-        let mut cursor_row: u16 = 0;
-        let mut found = false;
-
-        for (i, line) in input_lines.iter().enumerate() {
-            let line_chars = line.chars().count();
-            let is_last = i == input_lines.len() - 1;
-
-            if chars_remaining <= line_chars && (chars_remaining < line_chars || is_last) {
-                let col = chars_remaining as u16;
-                let visual_row = col / wrap_width;
-                let visual_col = col % wrap_width;
-                cursor_row += visual_row;
-                frame.set_cursor_position((input_col.x + visual_col, input_col.y + cursor_row));
-                found = true;
-                break;
-            }
-
-            let line_wrapped_rows = (line_chars as u16).div_ceil(wrap_width).max(1);
-            cursor_row += line_wrapped_rows;
-            chars_remaining = chars_remaining.saturating_sub(line_chars + 1);
+        let (cursor_col, cursor_row) = app.input_state.cursor_visual_position(w);
+        if cursor_row >= app.input_state.vertical_scroll
+            && cursor_row < app.input_state.vertical_scroll + visible_rows
+        {
+            let screen_row = cursor_row - app.input_state.vertical_scroll;
+            frame.set_cursor_position((input_col.x + cursor_col, input_col.y + screen_row));
         }
+    }
 
-        if !found {
-            frame.set_cursor_position((input_col.x, input_col.y));
-        }
+    // Render scrollbar if needed
+    if visual_lines.len() as u16 > visible_rows {
+        let scrollbar = ratatui::widgets::Scrollbar::default()
+            .orientation(ratatui::widgets::ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None);
+        let mut state = ratatui::widgets::ScrollbarState::default()
+            .content_length(visual_lines.len().saturating_sub(visible_rows as usize))
+            .position(app.input_state.vertical_scroll as usize);
+        frame.render_stateful_widget(scrollbar, input_col, &mut state);
     }
 }
 
@@ -1145,9 +1106,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
         spans.push(Span::raw(" ".repeat(left_pad)));
         spans.push(Span::styled(center_str, center_style));
-    } else if !center_str.is_empty()
-        && left_len + gap + center_len <= width
-        && right_out.is_empty()
+    } else if !center_str.is_empty() && left_len + gap + center_len <= width && right_out.is_empty()
     {
         let remaining = width.saturating_sub(left_len + center_len);
         let left_pad = remaining / 2;
