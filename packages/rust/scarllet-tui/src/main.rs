@@ -305,12 +305,38 @@ fn handle_paste(app: &mut App, text: &str) {
     }
 }
 
+fn find_running_task_id(messages: &[ChatEntry]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            ChatEntry::Agent {
+                task_id,
+                done: false,
+                ..
+            } => Some(task_id.clone()),
+            _ => None,
+        })
+}
+
 fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return true;
     }
 
     if !matches!(app.route, Route::Chat) {
+        return false;
+    }
+
+    if key.code == KeyCode::Esc && app.is_streaming() {
+        if let Some(task_id) = find_running_task_id(&app.messages) {
+            let msg = TuiMessage {
+                payload: Some(tui_message::Payload::Cancel(CancelPrompt {
+                    task_id,
+                })),
+            };
+            let _ = app.message_tx.try_send(msg);
+        }
         return false;
     }
 
@@ -618,9 +644,9 @@ fn draw_chat(frame: &mut Frame, app: &mut App) {
 
 fn thinking_dots(tick: u64) -> &'static str {
     match (tick / 3) % 4 {
-        1 => "·",
-        2 => "··",
-        3 => "···",
+        1 => ".",
+        2 => "..",
+        3 => "...",
         _ => "",
     }
 }
@@ -844,7 +870,7 @@ fn draw_history(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
                 if !done {
                     let dots = thinking_dots(app.tick);
                     lines.push(Line::styled(
-                        format!("Working{dots}"),
+                        format!("Working (press ESC to stop) {dots}"),
                         Style::default().fg(Color::Yellow),
                     ));
                 }

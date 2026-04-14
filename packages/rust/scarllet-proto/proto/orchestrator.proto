@@ -100,7 +100,12 @@ message AgentStatusResponse {
 message TuiMessage {
   oneof payload {
     PromptMessage prompt = 1;
+    CancelPrompt cancel = 2;
   }
+}
+
+message CancelPrompt {
+  string task_id = 1;
 }
 
 message PromptMessage {

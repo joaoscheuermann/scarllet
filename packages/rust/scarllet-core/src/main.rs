@@ -286,18 +286,43 @@ impl Orchestrator for OrchestratorService {
 
         tokio::spawn(async move {
             while let Ok(Some(msg)) = incoming.message().await {
-                if let Some(tui_message::Payload::Prompt(prompt)) = msg.payload {
-                    route_prompt(
-                        &prompt.text,
-                        &prompt.working_directory,
-                        &registry,
-                        &config,
-                        &task_manager,
-                        &session_registry,
-                        &agent_registry,
-                        &core_addr,
-                    )
-                    .await;
+                match msg.payload {
+                    Some(tui_message::Payload::Prompt(prompt)) => {
+                        route_prompt(
+                            &prompt.text,
+                            &prompt.working_directory,
+                            &registry,
+                            &config,
+                            &task_manager,
+                            &session_registry,
+                            &agent_registry,
+                            &core_addr,
+                        )
+                        .await;
+                    }
+                    Some(tui_message::Payload::Cancel(cancel)) => {
+                        let agent_name = {
+                            let tm = task_manager.read().await;
+                            tm.get(&cancel.task_id)
+                                .map(|t| t.agent_name.clone())
+                                .unwrap_or_default()
+                        };
+                        let success =
+                            tasks::cancel_task(&task_manager, &cancel.task_id).await;
+                        if success {
+                            let event = CoreEvent {
+                                payload: Some(core_event::Payload::AgentError(
+                                    AgentErrorEvent {
+                                        task_id: cancel.task_id,
+                                        agent_name,
+                                        error: "Cancelled by user".into(),
+                                    },
+                                )),
+                            };
+                            session_registry.read().await.broadcast(event);
+                        }
+                    }
+                    _ => {}
                 }
             }
             session_registry.write().await.deregister(&session_id);
