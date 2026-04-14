@@ -124,7 +124,13 @@ message CoreEvent {
     ProviderInfoEvent provider_info = 7;
     AgentToolCallEvent agent_tool_call = 8;
     DebugLogEvent debug_log = 9;
+    TokenUsageEvent token_usage = 10;
   }
+}
+
+message TokenUsageEvent {
+  uint32 total_tokens = 1;
+  uint32 context_window = 2;
 }
 
 message DebugLogEvent {
@@ -179,7 +185,14 @@ message AgentMessage {
     AgentResultMsg result = 3;
     AgentFailure failure = 4;
     AgentToolCallMsg tool_call = 5;
+    AgentTokenUsageMsg token_usage = 6;
   }
+}
+
+message AgentTokenUsageMsg {
+  string task_id = 1;
+  uint32 total_tokens = 2;
+  uint32 context_window = 3;
 }
 
 message AgentToolCallMsg {

@@ -115,6 +115,7 @@ pub struct ChatStreamEvent {
     pub deltas: Vec<StreamDelta>,
     pub finish_reason: Option<String>,
     pub tool_calls: Vec<ToolCallDelta>,
+    pub usage: Option<Usage>,
 }
 
 pub type ChatStream = Pin<Box<dyn Stream<Item = Result<ChatStreamEvent, crate::LlmError>> + Send>>;
@@ -123,4 +124,5 @@ pub type ChatStream = Pin<Box<dyn Stream<Item = Result<ChatStreamEvent, crate::L
 pub trait LlmProvider: Send + Sync {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, crate::LlmError>;
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, crate::LlmError>;
+    async fn get_context_window(&self, model: &str) -> Result<u32, crate::LlmError>;
 }

@@ -258,6 +258,12 @@ impl LlmProvider for GeminiProvider {
                     Ok(resp) => {
                         let (blocks, tool_calls, finish_reason) = extract_response(&resp);
 
+                        let usage = resp.usage_metadata.map(|u| Usage {
+                            prompt_tokens: u.prompt_token_count.unwrap_or(0) as u32,
+                            completion_tokens: u.candidates_token_count.unwrap_or(0) as u32,
+                            total_tokens: u.total_token_count.unwrap_or(0) as u32,
+                        });
+
                         let deltas: Vec<StreamDelta> = blocks
                             .into_iter()
                             .filter(|b| !b.text.is_empty())
@@ -281,7 +287,7 @@ impl LlmProvider for GeminiProvider {
 
                         let fr = if finish_reason != "stop" || !tc_deltas.is_empty() {
                             Some(finish_reason)
-                        } else if deltas.is_empty() && tc_deltas.is_empty() {
+                        } else if deltas.is_empty() && tc_deltas.is_empty() && usage.is_none() {
                             continue;
                         } else {
                             None
@@ -291,6 +297,7 @@ impl LlmProvider for GeminiProvider {
                             deltas,
                             finish_reason: fr,
                             tool_calls: tc_deltas,
+                            usage,
                         };
 
                         if tx.send(Ok(event)).await.is_err() {
@@ -306,5 +313,40 @@ impl LlmProvider for GeminiProvider {
         });
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+
+    async fn get_context_window(&self, model: &str) -> Result<u32, LlmError> {
+        let model_path = if model.starts_with("models/") {
+            model.to_string()
+        } else {
+            format!("models/{model}")
+        };
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/{}?key={}",
+            model_path, self.api_key
+        );
+
+        let http = reqwest::Client::new();
+        let resp = http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Ok(0);
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| LlmError::InvalidResponse(e.to_string()))?;
+
+        let ctx = body
+            .get("inputTokenLimit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        Ok(ctx)
     }
 }

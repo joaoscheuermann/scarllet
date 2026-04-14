@@ -103,6 +103,8 @@ struct App {
     git_info: Option<git_info::GitInfo>,
     last_env_refresh: Instant,
     debug_enabled: bool,
+    total_tokens: u32,
+    context_window: u32,
 }
 
 fn total_block_chars(blocks: &[DisplayBlock]) -> usize {
@@ -143,6 +145,8 @@ impl App {
             debug_enabled: std::env::var("SCARLLET_DEBUG")
                 .map(|v| v == "true")
                 .unwrap_or(false),
+            total_tokens: 0,
+            context_window: 0,
         }
     }
 
@@ -548,6 +552,10 @@ fn handle_core_event(app: &mut App, event: CoreEvent) {
             app.provider_name = e.provider_name;
             app.model = e.model;
             app.reasoning_effort = e.reasoning_effort;
+        }
+        core_event::Payload::TokenUsage(e) => {
+            app.total_tokens = e.total_tokens;
+            app.context_window = e.context_window;
         }
     }
 }
@@ -1013,6 +1021,46 @@ fn format_git_segment(info: &git_info::GitInfo) -> String {
     info.short_sha.clone()
 }
 
+fn format_compact(n: u32) -> String {
+    if n < 1_000 {
+        return format!("{n}");
+    }
+    let k = n as f64 / 1_000.0;
+    let decimal = (k.fract() * 10.0).round() as u32;
+    if decimal == 0 {
+        format!("{}k", k as u32)
+    } else {
+        format!("{:.1}k", k)
+    }
+}
+
+fn format_token_budget(total: u32, window: u32) -> String {
+    if window == 0 {
+        return String::new();
+    }
+    let pct = (total as f64 / window as f64 * 100.0).round() as u32;
+    format!(
+        "{} / {} tokens ({}%)",
+        format_compact(total),
+        format_compact(window),
+        pct
+    )
+}
+
+fn token_budget_style(total: u32, window: u32) -> Style {
+    if window == 0 {
+        return Style::default().fg(Color::DarkGray);
+    }
+    let pct = (total as f64 / window as f64 * 100.0).round() as u32;
+    if pct >= 95 {
+        Style::default().fg(Color::LightRed)
+    } else if pct >= 75 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
+}
+
 fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let style = Style::default().fg(Color::DarkGray);
     let sep = "  │  ";
@@ -1050,6 +1098,9 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .unwrap_or_default();
     let left_full = format!("{left_cwd}{left_git_str}");
 
+    let center_str = format_token_budget(app.total_tokens, app.context_window);
+    let center_style = token_budget_style(app.total_tokens, app.context_window);
+
     let gap = 2usize;
 
     let (left_out, right_out) =
@@ -1071,10 +1122,39 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     let left_len = left_out.chars().count();
     let right_len = right_out.chars().count();
+    let center_len = center_str.chars().count();
 
     let mut spans: Vec<Span> = vec![Span::styled(left_out, style)];
 
-    if !right_out.is_empty() && left_len + right_len < width {
+    let fits_all_three =
+        !center_str.is_empty() && left_len + gap + center_len + gap + right_len <= width;
+
+    if fits_all_three && !right_out.is_empty() {
+        let total_content = left_len + center_len + right_len;
+        let remaining = width.saturating_sub(total_content);
+        let left_pad = remaining / 2;
+        let right_pad = remaining - left_pad;
+
+        spans.push(Span::raw(" ".repeat(left_pad)));
+        spans.push(Span::styled(center_str, center_style));
+        spans.push(Span::raw(" ".repeat(right_pad)));
+        spans.push(Span::styled(right_out, style));
+    } else if fits_all_three {
+        let remaining = width.saturating_sub(left_len + center_len);
+        let left_pad = remaining / 2;
+
+        spans.push(Span::raw(" ".repeat(left_pad)));
+        spans.push(Span::styled(center_str, center_style));
+    } else if !center_str.is_empty()
+        && left_len + gap + center_len <= width
+        && right_out.is_empty()
+    {
+        let remaining = width.saturating_sub(left_len + center_len);
+        let left_pad = remaining / 2;
+
+        spans.push(Span::raw(" ".repeat(left_pad)));
+        spans.push(Span::styled(center_str, center_style));
+    } else if !right_out.is_empty() && left_len + right_len < width {
         let padding = width.saturating_sub(left_len + right_len);
         spans.push(Span::raw(" ".repeat(padding)));
         spans.push(Span::styled(right_out, style));

@@ -84,11 +84,18 @@ struct OaiRequest {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<OaiStreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     extra_body: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OaiToolDef>>,
+}
+
+#[derive(Serialize)]
+struct OaiStreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -159,6 +166,7 @@ struct OaiUsage {
 #[derive(Deserialize)]
 struct OaiStreamChunk {
     choices: Vec<OaiStreamChoice>,
+    usage: Option<OaiUsage>,
 }
 
 #[derive(Deserialize)]
@@ -278,7 +286,24 @@ fn convert_tools(tools: &Option<Vec<ToolDefinition>>) -> Option<Vec<OaiToolDef>>
 
 fn parse_stream_chunk(data: &str) -> Option<ChatStreamEvent> {
     let chunk: OaiStreamChunk = serde_json::from_str(data).ok()?;
-    let choice = chunk.choices.into_iter().next()?;
+
+    let usage = chunk.usage.map(|u| Usage {
+        prompt_tokens: u.prompt_tokens,
+        completion_tokens: u.completion_tokens,
+        total_tokens: u.total_tokens,
+    });
+
+    let Some(choice) = chunk.choices.into_iter().next() else {
+        if usage.is_some() {
+            return Some(ChatStreamEvent {
+                deltas: Vec::new(),
+                finish_reason: None,
+                tool_calls: Vec::new(),
+                usage,
+            });
+        }
+        return None;
+    };
 
     let content = choice.delta.content.unwrap_or_default();
     let reasoning = choice.delta.reasoning_content.unwrap_or_default();
@@ -305,7 +330,7 @@ fn parse_stream_chunk(data: &str) -> Option<ChatStreamEvent> {
         })
         .collect();
 
-    if deltas.is_empty() && choice.finish_reason.is_none() && tool_calls.is_empty() {
+    if deltas.is_empty() && choice.finish_reason.is_none() && tool_calls.is_empty() && usage.is_none() {
         return None;
     }
 
@@ -313,6 +338,7 @@ fn parse_stream_chunk(data: &str) -> Option<ChatStreamEvent> {
         deltas,
         finish_reason: choice.finish_reason,
         tool_calls,
+        usage,
     })
 }
 
@@ -367,6 +393,7 @@ impl LlmProvider for OpenAiProvider {
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: false,
+            stream_options: None,
             reasoning_effort: reasoning,
             extra_body: request.extra_body,
             tools,
@@ -459,6 +486,7 @@ impl LlmProvider for OpenAiProvider {
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: true,
+            stream_options: Some(OaiStreamOptions { include_usage: true }),
             reasoning_effort: reasoning,
             extra_body: request.extra_body,
             tools,
@@ -486,6 +514,34 @@ impl LlmProvider for OpenAiProvider {
         }
 
         Ok(spawn_sse_reader(resp))
+    }
+
+    async fn get_context_window(&self, model: &str) -> Result<u32, LlmError> {
+        let url = format!("{}/models/{}", self.base_url, model);
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Ok(0);
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| LlmError::InvalidResponse(e.to_string()))?;
+
+        let ctx = body
+            .get("context_window")
+            .or_else(|| body.get("context_length"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        Ok(ctx)
     }
 }
 

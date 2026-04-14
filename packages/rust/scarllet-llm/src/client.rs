@@ -27,4 +27,8 @@ impl LlmClient {
     pub async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
         self.provider.chat_stream(request).await
     }
+
+    pub async fn get_context_window(&self, model: &str) -> Result<u32, LlmError> {
+        self.provider.get_context_window(model).await
+    }
 }

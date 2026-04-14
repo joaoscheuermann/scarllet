@@ -236,6 +236,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await;
 
+        let context_window = llm
+            .get_context_window(&provider_resp.model)
+            .await
+            .unwrap_or(0);
+
+        debug_log(
+            &mut client,
+            "debug",
+            &format!("Context window for {}: {context_window}", provider_resp.model),
+        )
+        .await;
+
         history.push(ChatMessage {
             role: Role::User,
             content: task.prompt.clone(),
@@ -262,6 +274,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &provider_resp.model,
             &reasoning_effort,
             &mut blocks,
+            context_window,
         )
         .await
         {
@@ -291,6 +304,7 @@ async fn run_tool_loop(
     model: &str,
     reasoning_effort: &Option<String>,
     blocks: &mut Vec<AgentBlock>,
+    context_window: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let mut messages = vec![ChatMessage {
@@ -333,6 +347,7 @@ async fn run_tool_loop(
         };
         let mut accumulated_tool_calls: Vec<(String, String, String, Option<String>)> = Vec::new();
         let mut finish_reason = String::new();
+        let mut last_usage: Option<scarllet_llm::types::Usage> = None;
 
         while let Some(event) = stream.next().await {
             match event {
@@ -340,6 +355,7 @@ async fn run_tool_loop(
                     deltas,
                     finish_reason: fr,
                     tool_calls,
+                    usage,
                 }) => {
                     accumulate_stream_deltas(blocks, &deltas);
 
@@ -349,6 +365,10 @@ async fn run_tool_loop(
 
                     if let Some(reason) = fr {
                         finish_reason = reason;
+                    }
+
+                    if usage.is_some() {
+                        last_usage = usage;
                     }
 
                     let progress = AgentMessage {
@@ -369,6 +389,17 @@ async fn run_tool_loop(
                     return Err(e.into());
                 }
             }
+        }
+
+        if let Some(ref usage) = last_usage {
+            let token_msg = AgentMessage {
+                payload: Some(agent_message::Payload::TokenUsage(AgentTokenUsageMsg {
+                    task_id: task.task_id.clone(),
+                    total_tokens: usage.total_tokens,
+                    context_window,
+                })),
+            };
+            let _ = msg_tx.send(token_msg).await;
         }
 
         debug_log(
@@ -426,6 +457,14 @@ async fn run_tool_loop(
                 block_type: "tool_call_ref".into(),
                 content: tc.id.clone(),
             });
+
+            let progress = AgentMessage {
+                payload: Some(agent_message::Payload::Progress(AgentProgressMsg {
+                    task_id: task.task_id.clone(),
+                    blocks: blocks.clone(),
+                })),
+            };
+            let _ = msg_tx.send(progress).await;
 
             let start_msg = AgentMessage {
                 payload: Some(agent_message::Payload::ToolCall(AgentToolCallMsg {

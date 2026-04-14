@@ -448,6 +448,17 @@ impl Orchestrator for OrchestratorService {
                         };
                         session_registry.read().await.broadcast(event);
                     }
+                    agent_message::Payload::TokenUsage(tu) => {
+                        let event = CoreEvent {
+                            payload: Some(core_event::Payload::TokenUsage(
+                                TokenUsageEvent {
+                                    total_tokens: tu.total_tokens,
+                                    context_window: tu.context_window,
+                                },
+                            )),
+                        };
+                        session_registry.read().await.broadcast(event);
+                    }
                 }
             }
 
