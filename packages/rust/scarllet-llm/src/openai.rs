@@ -27,9 +27,30 @@ impl OpenAiProvider {
     fn build_oai_messages(messages: &[ChatMessage]) -> Vec<OaiMessage> {
         messages
             .iter()
-            .map(|m| OaiMessage {
-                role: role_to_string(&m.role),
-                content: m.content.clone(),
+            .map(|m| {
+                let tool_calls = m.tool_calls.as_ref().map(|tcs| {
+                    tcs.iter()
+                        .map(|tc| OaiToolCall {
+                            id: tc.id.clone(),
+                            r#type: tc.tool_type.clone(),
+                            function: OaiFunctionCall {
+                                name: tc.function.name.clone(),
+                                arguments: tc.function.arguments.clone(),
+                            },
+                        })
+                        .collect()
+                });
+
+                OaiMessage {
+                    role: role_to_string(&m.role),
+                    content: if m.content.is_empty() && tool_calls.is_some() {
+                        None
+                    } else {
+                        Some(m.content.clone())
+                    },
+                    tool_calls,
+                    tool_call_id: m.tool_call_id.clone(),
+                }
             })
             .collect()
     }
@@ -66,12 +87,45 @@ struct OaiRequest {
     reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     extra_body: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OaiToolDef>>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct OaiMessage {
     role: String,
-    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OaiToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct OaiToolDef {
+    r#type: String,
+    function: OaiFunctionDef,
+}
+
+#[derive(Serialize, Deserialize)]
+struct OaiFunctionDef {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct OaiToolCall {
+    id: String,
+    r#type: String,
+    function: OaiFunctionCall,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct OaiFunctionCall {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Deserialize)]
@@ -82,8 +136,17 @@ struct OaiResponse {
 
 #[derive(Deserialize)]
 struct OaiChoice {
-    message: OaiMessage,
+    message: OaiChoiceMessage,
     finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OaiChoiceMessage {
+    role: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OaiToolCall>>,
 }
 
 #[derive(Deserialize)]
@@ -110,6 +173,25 @@ struct OaiStreamDelta {
     content: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<OaiStreamToolCall>>,
+}
+
+#[derive(Deserialize)]
+struct OaiStreamToolCall {
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OaiStreamFunctionCall>,
+}
+
+#[derive(Deserialize)]
+struct OaiStreamFunctionCall {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 fn role_to_string(r: &Role) -> String {
@@ -179,6 +261,21 @@ fn drain_sse_events(buf: &mut BytesMut) -> Vec<String> {
     events
 }
 
+fn convert_tools(tools: &Option<Vec<ToolDefinition>>) -> Option<Vec<OaiToolDef>> {
+    tools.as_ref().map(|defs| {
+        defs.iter()
+            .map(|t| OaiToolDef {
+                r#type: t.tool_type.clone(),
+                function: OaiFunctionDef {
+                    name: t.function.name.clone(),
+                    description: t.function.description.clone(),
+                    parameters: t.function.parameters.clone(),
+                },
+            })
+            .collect()
+    })
+}
+
 fn parse_stream_chunk(data: &str) -> Option<ChatStreamEvent> {
     let chunk: OaiStreamChunk = serde_json::from_str(data).ok()?;
     let choice = chunk.choices.into_iter().next()?;
@@ -186,19 +283,36 @@ fn parse_stream_chunk(data: &str) -> Option<ChatStreamEvent> {
     let content = choice.delta.content.unwrap_or_default();
     let reasoning = choice.delta.reasoning_content.unwrap_or_default();
 
-    let delta = if !reasoning.is_empty() {
-        format!("<thought>{reasoning}</thought>{content}")
-    } else {
-        content
-    };
+    let mut deltas = Vec::new();
+    if !reasoning.is_empty() {
+        deltas.push(StreamDelta::Thought(reasoning));
+    }
+    if !content.is_empty() {
+        deltas.push(StreamDelta::Content(content));
+    }
 
-    if delta.is_empty() && choice.finish_reason.is_none() {
+    let tool_calls: Vec<ToolCallDelta> = choice
+        .delta
+        .tool_calls
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tc| ToolCallDelta {
+            index: tc.index,
+            id: tc.id,
+            function_name: tc.function.as_ref().and_then(|f| f.name.clone()),
+            function_arguments: tc.function.and_then(|f| f.arguments),
+            thought_signature: None,
+        })
+        .collect();
+
+    if deltas.is_empty() && choice.finish_reason.is_none() && tool_calls.is_empty() {
         return None;
     }
 
     Some(ChatStreamEvent {
-        delta,
+        deltas,
         finish_reason: choice.finish_reason,
+        tool_calls,
     })
 }
 
@@ -246,6 +360,7 @@ fn spawn_sse_reader(resp: reqwest::Response) -> ChatStream {
 impl LlmProvider for OpenAiProvider {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         let reasoning = Self::resolve_reasoning(request.reasoning_effort, &request.extra_body);
+        let tools = convert_tools(&request.tools);
         let oai_req = OaiRequest {
             model: request.model,
             messages: Self::build_oai_messages(&request.messages),
@@ -254,6 +369,7 @@ impl LlmProvider for OpenAiProvider {
             stream: false,
             reasoning_effort: reasoning,
             extra_body: request.extra_body,
+            tools,
         };
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -297,11 +413,38 @@ impl LlmProvider for OpenAiProvider {
             })
             .unwrap_or_default();
 
+        let tool_calls = choice.message.tool_calls.map(|tcs| {
+            tcs.into_iter()
+                .map(|tc| ToolCall {
+                    id: tc.id,
+                    tool_type: tc.r#type,
+                    function: crate::types::FunctionCall {
+                        name: tc.function.name,
+                        arguments: tc.function.arguments,
+                    },
+                    thought_signature: None,
+                })
+                .collect()
+        });
+
+        let content_text = choice.message.content.unwrap_or_default();
+        let blocks = if content_text.is_empty() {
+            Vec::new()
+        } else {
+            vec![ContentBlock {
+                block_type: ContentBlockType::Text,
+                text: content_text.clone(),
+            }]
+        };
+
         Ok(ChatResponse {
             message: ChatMessage {
                 role: string_to_role(&choice.message.role),
-                content: choice.message.content,
+                content: content_text,
+                tool_calls,
+                tool_call_id: None,
             },
+            blocks,
             usage,
             finish_reason: choice.finish_reason.unwrap_or_else(|| "stop".into()),
         })
@@ -309,6 +452,7 @@ impl LlmProvider for OpenAiProvider {
 
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
         let reasoning = Self::resolve_reasoning(request.reasoning_effort, &request.extra_body);
+        let tools = convert_tools(&request.tools);
         let oai_req = OaiRequest {
             model: request.model,
             messages: Self::build_oai_messages(&request.messages),
@@ -317,6 +461,7 @@ impl LlmProvider for OpenAiProvider {
             stream: true,
             reasoning_effort: reasoning,
             extra_body: request.extra_body,
+            tools,
         };
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -363,8 +508,10 @@ mod tests {
         let events = drain_sse_events(&mut buf);
         assert_eq!(events.len(), 1);
         let event = parse_stream_chunk(&events[0]).unwrap();
-        assert_eq!(event.delta, "Hello");
+        assert_eq!(event.deltas.len(), 1);
+        assert!(matches!(&event.deltas[0], StreamDelta::Content(t) if t == "Hello"));
         assert!(event.finish_reason.is_none());
+        assert!(event.tool_calls.is_empty());
     }
 
     #[test]
@@ -383,16 +530,44 @@ mod tests {
     }
 
     #[test]
-    fn parse_reasoning_wrapped_in_thought_tags() {
+    fn parse_reasoning_as_thought_delta() {
         let data = r#"{"choices":[{"delta":{"reasoning_content":"thinking...","content":""},"finish_reason":null}]}"#;
         let event = parse_stream_chunk(data).unwrap();
-        assert_eq!(event.delta, "<thought>thinking...</thought>");
+        assert_eq!(event.deltas.len(), 1);
+        assert!(matches!(&event.deltas[0], StreamDelta::Thought(t) if t == "thinking..."));
     }
 
     #[test]
     fn parse_content_only() {
         let data = r#"{"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}"#;
         let event = parse_stream_chunk(data).unwrap();
-        assert_eq!(event.delta, "Hello");
+        assert_eq!(event.deltas.len(), 1);
+        assert!(matches!(&event.deltas[0], StreamDelta::Content(t) if t == "Hello"));
+    }
+
+    #[test]
+    fn parse_tool_call_delta() {
+        let data = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_123","function":{"name":"terminal","arguments":"{\"co"}}]},"finish_reason":null}]}"#;
+        let event = parse_stream_chunk(data).unwrap();
+        assert!(event.deltas.is_empty());
+        assert_eq!(event.tool_calls.len(), 1);
+        assert_eq!(event.tool_calls[0].index, 0);
+        assert_eq!(event.tool_calls[0].id.as_deref(), Some("call_123"));
+        assert_eq!(
+            event.tool_calls[0].function_name.as_deref(),
+            Some("terminal")
+        );
+        assert_eq!(
+            event.tool_calls[0].function_arguments.as_deref(),
+            Some("{\"co")
+        );
+    }
+
+    #[test]
+    fn parse_finish_reason_tool_calls() {
+        let data =
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+        let event = parse_stream_chunk(data).unwrap();
+        assert_eq!(event.finish_reason.as_deref(), Some("tool_calls"));
     }
 }

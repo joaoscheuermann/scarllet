@@ -1,0 +1,22 @@
+{
+  "name": "terminal-tool",
+  "$schema": "../../../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "sourceRoot": "packages/rust/tools/terminal/src",
+  "targets": {
+    "build": {
+      "executor": "@monodon/rust:build",
+      "outputs": ["{options.target-dir}"],
+      "options": {
+        "target-dir": "dist/target/terminal-tool"
+      }
+    },
+    "run": {
+      "executor": "@monodon/rust:run",
+      "options": {
+        "target-dir": "dist/target/terminal-tool"
+      }
+    }
+  },
+  "tags": []
+}

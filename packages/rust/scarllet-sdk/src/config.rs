@@ -3,36 +3,67 @@ use std::io;
 use std::path::PathBuf;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScarlletConfig {
     #[serde(default)]
-    pub active_provider: String,
+    pub provider: String,
     #[serde(default)]
     pub providers: Vec<Provider>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderType {
+    Openai,
+    Gemini,
+}
+
+impl Default for ProviderType {
+    fn default() -> Self {
+        Self::Openai
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelConfig {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Provider {
     pub name: String,
+    #[serde(rename = "type", default)]
+    pub provider_type: ProviderType,
     pub api_key: String,
-    pub api_url: String,
-    #[serde(default)]
-    pub models: Vec<String>,
-    #[serde(default)]
-    pub active_model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra_body: Option<serde_json::Value>,
+    pub api_url: Option<String>,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub models: Vec<ModelConfig>,
+}
+
+impl Provider {
+    pub fn active_model_config(&self) -> Option<&ModelConfig> {
+        self.models.iter().find(|m| m.id == self.model)
+    }
+
+    pub fn reasoning_effort(&self) -> Option<&str> {
+        self.active_model_config()
+            .and_then(|m| m.reasoning.as_deref())
+    }
 }
 
 impl ScarlletConfig {
     pub fn active_provider(&self) -> Option<&Provider> {
-        if self.active_provider.is_empty() {
+        if self.provider.is_empty() {
             return None;
         }
-        self.providers
-            .iter()
-            .find(|p| p.name == self.active_provider)
+        self.providers.iter().find(|p| p.name == self.provider)
     }
 }
 
@@ -72,50 +103,88 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip() {
+    fn roundtrip_openai() {
         let config = ScarlletConfig {
-            active_provider: "openrouter".into(),
+            provider: "openrouter".into(),
             providers: vec![Provider {
                 name: "openrouter".into(),
+                provider_type: ProviderType::Openai,
                 api_key: "sk-test".into(),
-                api_url: "https://openrouter.ai/api/v1".into(),
-                models: vec!["gpt-4o".into(), "claude-sonnet".into()],
-                active_model: "gpt-4o".into(),
-                reasoning_effort: Some("high".into()),
-                extra_body: None,
+                api_url: Some("https://openrouter.ai/api/v1".into()),
+                model: "gpt-4o".into(),
+                models: vec![
+                    ModelConfig {
+                        id: "gpt-4o".into(),
+                        reasoning: None,
+                    },
+                    ModelConfig {
+                        id: "o3-mini".into(),
+                        reasoning: Some("high".into()),
+                    },
+                ],
             }],
         };
         let json = serde_json::to_string(&config).unwrap();
         let loaded: ScarlletConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.active_provider, "openrouter");
+        assert_eq!(loaded.provider, "openrouter");
         assert_eq!(loaded.providers[0].api_key, "sk-test");
-        assert_eq!(loaded.providers[0].active_model, "gpt-4o");
+        assert_eq!(loaded.providers[0].model, "gpt-4o");
+        assert_eq!(loaded.providers[0].provider_type, ProviderType::Openai);
+    }
+
+    #[test]
+    fn roundtrip_gemini() {
+        let config = ScarlletConfig {
+            provider: "my-gemini".into(),
+            providers: vec![Provider {
+                name: "my-gemini".into(),
+                provider_type: ProviderType::Gemini,
+                api_key: "AIza-test".into(),
+                api_url: None,
+                model: "gemini-3.1-pro-preview".into(),
+                models: vec![ModelConfig {
+                    id: "gemini-3.1-pro-preview".into(),
+                    reasoning: Some("high".into()),
+                }],
+            }],
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: ScarlletConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.provider, "my-gemini");
+        assert_eq!(loaded.providers[0].provider_type, ProviderType::Gemini);
+        assert!(loaded.providers[0].api_url.is_none());
+        assert_eq!(
+            loaded.providers[0].reasoning_effort(),
+            Some("high")
+        );
     }
 
     #[test]
     fn empty_default() {
         let config = ScarlletConfig::default();
-        assert!(config.active_provider.is_empty());
+        assert!(config.provider.is_empty());
         assert!(config.providers.is_empty());
     }
 
     #[test]
     fn active_provider_found() {
         let config = ScarlletConfig {
-            active_provider: "local".into(),
+            provider: "local".into(),
             providers: vec![Provider {
                 name: "local".into(),
+                provider_type: ProviderType::Openai,
                 api_key: String::new(),
-                api_url: "http://localhost:11434/v1".into(),
-                models: vec!["llama3".into()],
-                active_model: "llama3".into(),
-                reasoning_effort: None,
-                extra_body: None,
+                api_url: Some("http://localhost:11434/v1".into()),
+                model: "llama3".into(),
+                models: vec![ModelConfig {
+                    id: "llama3".into(),
+                    reasoning: None,
+                }],
             }],
         };
         let p = config.active_provider().unwrap();
         assert_eq!(p.name, "local");
-        assert_eq!(p.active_model, "llama3");
+        assert_eq!(p.model, "llama3");
     }
 
     #[test]
@@ -127,7 +196,7 @@ mod tests {
     #[test]
     fn active_provider_not_in_list() {
         let config = ScarlletConfig {
-            active_provider: "missing".into(),
+            provider: "missing".into(),
             providers: vec![],
         };
         assert!(config.active_provider().is_none());
@@ -137,7 +206,59 @@ mod tests {
     fn deserialize_missing_fields_uses_defaults() {
         let json = r#"{}"#;
         let config: ScarlletConfig = serde_json::from_str(json).unwrap();
-        assert!(config.active_provider.is_empty());
+        assert!(config.provider.is_empty());
         assert!(config.providers.is_empty());
+    }
+
+    #[test]
+    fn model_config_reasoning_lookup() {
+        let provider = Provider {
+            name: "test".into(),
+            provider_type: ProviderType::Gemini,
+            api_key: "key".into(),
+            api_url: None,
+            model: "gemini-pro".into(),
+            models: vec![
+                ModelConfig {
+                    id: "gemini-pro".into(),
+                    reasoning: Some("medium".into()),
+                },
+                ModelConfig {
+                    id: "gemini-flash".into(),
+                    reasoning: None,
+                },
+            ],
+        };
+        assert_eq!(provider.reasoning_effort(), Some("medium"));
+        assert_eq!(provider.active_model_config().unwrap().id, "gemini-pro");
+    }
+
+    #[test]
+    fn deserialize_from_json_example() {
+        let json = r#"{
+            "provider": "gemini",
+            "providers": [
+                {
+                    "name": "gemini",
+                    "type": "gemini",
+                    "apiKey": "AIzaSy-test",
+                    "model": "gemini-3.1-pro-preview",
+                    "models": [
+                        {
+                            "id": "gemini-3.1-pro-preview",
+                            "reasoning": "high"
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let config: ScarlletConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.provider, "gemini");
+        let p = config.active_provider().unwrap();
+        assert_eq!(p.provider_type, ProviderType::Gemini);
+        assert_eq!(p.api_key, "AIzaSy-test");
+        assert!(p.api_url.is_none());
+        assert_eq!(p.model, "gemini-3.1-pro-preview");
+        assert_eq!(p.reasoning_effort(), Some("high"));
     }
 }

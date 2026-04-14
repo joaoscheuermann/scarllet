@@ -14,6 +14,13 @@ service Orchestrator {
   rpc GetAgentStatus(AgentStatusQuery) returns (AgentStatusResponse);
   rpc AttachTui(stream TuiMessage) returns (stream CoreEvent);
   rpc AgentStream(stream AgentMessage) returns (stream AgentTask);
+  rpc EmitDebugLog(DebugLogRequest) returns (Ack);
+}
+
+message DebugLogRequest {
+  string source = 1;
+  string level = 2;
+  string message = 3;
 }
 
 message PingRequest {}
@@ -40,11 +47,11 @@ message ActiveProviderQuery {}
 message ActiveProviderResponse {
   bool configured = 1;
   string provider_name = 2;
-  string api_url = 3;
-  string api_key = 4;
-  string model = 5;
-  string reasoning_effort = 6;
-  string extra_body_json = 7;
+  string provider_type = 3;
+  string api_url = 4;
+  string api_key = 5;
+  string model = 6;
+  string reasoning_effort = 7;
 }
 
 message ToolInvocation {
@@ -110,13 +117,46 @@ message CoreEvent {
     AgentErrorEvent agent_error = 5;
     SystemEvent system = 6;
     ProviderInfoEvent provider_info = 7;
+    AgentToolCallEvent agent_tool_call = 8;
+    DebugLogEvent debug_log = 9;
   }
+}
+
+message DebugLogEvent {
+  string source = 1;
+  string level = 2;
+  string message = 3;
+  uint64 timestamp_ms = 4;
+}
+
+message AgentToolCallEvent {
+  string task_id = 1;
+  string agent_name = 2;
+  string call_id = 3;
+  string tool_name = 4;
+  string arguments_preview = 5;
+  string status = 6;
+  uint64 duration_ms = 7;
+  string result = 8;
 }
 
 message ConnectedEvent { uint64 uptime_secs = 1; }
 message AgentStartedEvent { string task_id = 1; string agent_name = 2; }
-message AgentThinkingEvent { string task_id = 1; string agent_name = 2; string content = 3; }
-message AgentResponseEvent { string task_id = 1; string agent_name = 2; string content = 3; }
+message AgentBlock {
+  string block_type = 1;
+  string content = 2;
+}
+
+message AgentThinkingEvent {
+  string task_id = 1;
+  string agent_name = 2;
+  repeated AgentBlock blocks = 3;
+}
+message AgentResponseEvent {
+  string task_id = 1;
+  string agent_name = 2;
+  repeated AgentBlock blocks = 3;
+}
 message AgentErrorEvent { string task_id = 1; string agent_name = 2; string error = 3; }
 message SystemEvent { string message = 1; }
 message ProviderInfoEvent {
@@ -133,12 +173,29 @@ message AgentMessage {
     AgentProgressMsg progress = 2;
     AgentResultMsg result = 3;
     AgentFailure failure = 4;
+    AgentToolCallMsg tool_call = 5;
   }
 }
 
+message AgentToolCallMsg {
+  string task_id = 1;
+  string call_id = 2;
+  string tool_name = 3;
+  string arguments_preview = 4;
+  string status = 5;
+  uint64 duration_ms = 6;
+  string result = 7;
+}
+
 message AgentRegister { string agent_name = 1; }
-message AgentProgressMsg { string task_id = 1; string content = 2; }
-message AgentResultMsg { string task_id = 1; string content = 2; }
+message AgentProgressMsg {
+  string task_id = 1;
+  repeated AgentBlock blocks = 2;
+}
+message AgentResultMsg {
+  string task_id = 1;
+  repeated AgentBlock blocks = 2;
+}
 message AgentFailure { string task_id = 1; string error = 2; }
 
 message AgentTask {

@@ -195,7 +195,7 @@ pub async fn watch_config(
         match config::load() {
             Ok(new_cfg) => {
                 let provider_count = new_cfg.providers.len();
-                let active = new_cfg.active_provider.clone();
+                let active = new_cfg.provider.clone();
                 *config.write().await = new_cfg;
                 info!(
                     "Config reloaded: {} provider(s), active='{active}'",
@@ -207,8 +207,11 @@ pub async fn watch_config(
                     Some(p) => CoreEvent {
                         payload: Some(core_event::Payload::ProviderInfo(ProviderInfoEvent {
                             provider_name: p.name.clone(),
-                            model: p.active_model.clone(),
-                            reasoning_effort: p.reasoning_effort.clone().unwrap_or_default(),
+                            model: p.model.clone(),
+                            reasoning_effort: p
+                                .reasoning_effort()
+                                .unwrap_or_default()
+                                .to_string(),
                         })),
                     },
                     None => CoreEvent {

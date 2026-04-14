@@ -18,6 +18,7 @@ New-Item -ItemType Directory -Force -Path $commandsDir | Out-Null
 Copy-Item (Join-Path $cargoRelease "scarllet-core.exe") (Join-Path $releaseDir "core.exe")
 Copy-Item (Join-Path $cargoRelease "scarllet-tui.exe") (Join-Path $releaseDir "tui.exe")
 Copy-Item (Join-Path $cargoRelease "default-agent.exe") (Join-Path $agentsDir "default.exe")
+Copy-Item (Join-Path $cargoRelease "terminal-tool.exe") (Join-Path $toolsDir "terminal.exe")
 
 Write-Host "Release folder created at: $releaseDir"
 Get-ChildItem -Recurse $releaseDir | ForEach-Object {

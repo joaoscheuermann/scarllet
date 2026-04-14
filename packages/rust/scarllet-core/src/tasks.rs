@@ -89,6 +89,17 @@ impl TaskManager {
             task.progress_log.push(message);
         }
     }
+
+    pub fn active_tasks_for_agent(&self, agent_name: &str) -> Vec<String> {
+        self.tasks
+            .iter()
+            .filter(|(_, t)| {
+                t.agent_name == agent_name
+                    && matches!(t.status, TaskStatus::Pending | TaskStatus::Running)
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
 }
 
 pub async fn spawn_agent(

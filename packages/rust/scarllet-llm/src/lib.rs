@@ -1,5 +1,6 @@
 pub mod client;
 pub mod error;
+pub mod gemini;
 pub mod openai;
 pub mod types;
 

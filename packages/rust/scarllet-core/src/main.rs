@@ -96,19 +96,24 @@ impl Orchestrator for OrchestratorService {
     ) -> Result<Response<ActiveProviderResponse>, Status> {
         let cfg = self.config.read().await;
         match cfg.active_provider() {
-            Some(provider) => Ok(Response::new(ActiveProviderResponse {
-                configured: true,
-                provider_name: provider.name.clone(),
-                api_url: provider.api_url.clone(),
-                api_key: provider.api_key.clone(),
-                model: provider.active_model.clone(),
-                reasoning_effort: provider.reasoning_effort.clone().unwrap_or_default(),
-                extra_body_json: provider
-                    .extra_body
-                    .as_ref()
-                    .map(|v| v.to_string())
-                    .unwrap_or_default(),
-            })),
+            Some(provider) => {
+                let type_str = match provider.provider_type {
+                    scarllet_sdk::config::ProviderType::Openai => "openai",
+                    scarllet_sdk::config::ProviderType::Gemini => "gemini",
+                };
+                Ok(Response::new(ActiveProviderResponse {
+                    configured: true,
+                    provider_name: provider.name.clone(),
+                    provider_type: type_str.into(),
+                    api_url: provider.api_url.clone().unwrap_or_default(),
+                    api_key: provider.api_key.clone(),
+                    model: provider.model.clone(),
+                    reasoning_effort: provider
+                        .reasoning_effort()
+                        .unwrap_or_default()
+                        .to_string(),
+                }))
+            }
             None => Ok(Response::new(ActiveProviderResponse {
                 configured: false,
                 ..Default::default()
@@ -129,6 +134,28 @@ impl Orchestrator for OrchestratorService {
             error_message: result.error_message,
             duration_ms: result.duration_ms,
         }))
+    }
+
+    async fn emit_debug_log(
+        &self,
+        req: Request<DebugLogRequest>,
+    ) -> Result<Response<Ack>, Status> {
+        let r = req.get_ref();
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let event = CoreEvent {
+            payload: Some(core_event::Payload::DebugLog(DebugLogEvent {
+                source: r.source.clone(),
+                level: r.level.clone(),
+                message: r.message.clone(),
+                timestamp_ms,
+            })),
+        };
+        self.session_registry.read().await.broadcast(event);
+        Ok(Response::new(Ack {}))
     }
 
     async fn submit_task(
@@ -175,12 +202,16 @@ impl Orchestrator for OrchestratorService {
             .unwrap_or_default();
         drop(tm);
 
+        let text_block = vec![AgentBlock {
+            block_type: "text".into(),
+            content: r.message.clone(),
+        }];
         let event = match r.status.as_str() {
             "response" => CoreEvent {
                 payload: Some(core_event::Payload::AgentResponse(AgentResponseEvent {
                     task_id: r.task_id.clone(),
                     agent_name,
-                    content: r.message.clone(),
+                    blocks: text_block,
                 })),
             },
             "error" => CoreEvent {
@@ -194,7 +225,7 @@ impl Orchestrator for OrchestratorService {
                 payload: Some(core_event::Payload::AgentThinking(AgentThinkingEvent {
                     task_id: r.task_id.clone(),
                     agent_name,
-                    content: r.message.clone(),
+                    blocks: text_block,
                 })),
             },
         };
@@ -318,7 +349,7 @@ impl Orchestrator for OrchestratorService {
                                 AgentThinkingEvent {
                                     task_id: p.task_id,
                                     agent_name: a_name,
-                                    content: p.content,
+                                    blocks: p.blocks,
                                 },
                             )),
                         };
@@ -341,7 +372,7 @@ impl Orchestrator for OrchestratorService {
                                 AgentResponseEvent {
                                     task_id: r.task_id,
                                     agent_name: a_name,
-                                    content: r.content,
+                                    blocks: r.blocks,
                                 },
                             )),
                         };
@@ -368,12 +399,55 @@ impl Orchestrator for OrchestratorService {
                         };
                         session_registry.read().await.broadcast(event);
                     }
+                    agent_message::Payload::ToolCall(tc) => {
+                        let tm = task_manager.read().await;
+                        let a_name = tm
+                            .get(&tc.task_id)
+                            .map(|t| t.agent_name.clone())
+                            .unwrap_or_default();
+                        drop(tm);
+
+                        let event = CoreEvent {
+                            payload: Some(core_event::Payload::AgentToolCall(
+                                AgentToolCallEvent {
+                                    task_id: tc.task_id,
+                                    agent_name: a_name,
+                                    call_id: tc.call_id,
+                                    tool_name: tc.tool_name,
+                                    arguments_preview: tc.arguments_preview,
+                                    status: tc.status,
+                                    duration_ms: tc.duration_ms,
+                                    result: tc.result,
+                                },
+                            )),
+                        };
+                        session_registry.read().await.broadcast(event);
+                    }
                 }
             }
 
             if let Some(name) = agent_name {
                 agent_registry.write().await.deregister(&name);
                 info!("Agent '{name}' disconnected from AgentStream");
+
+                let mut tm = task_manager.write().await;
+                let orphaned = tm.active_tasks_for_agent(&name);
+                for tid in &orphaned {
+                    tm.set_status(tid, tasks::TaskStatus::Failed);
+                    tm.add_progress(tid, "Agent disconnected unexpectedly".into());
+                }
+                drop(tm);
+
+                for tid in orphaned {
+                    let event = CoreEvent {
+                        payload: Some(core_event::Payload::AgentError(AgentErrorEvent {
+                            task_id: tid,
+                            agent_name: name.clone(),
+                            error: "Agent disconnected unexpectedly".into(),
+                        })),
+                    };
+                    session_registry.read().await.broadcast(event);
+                }
             }
         });
 
@@ -386,8 +460,11 @@ fn build_provider_info_event(cfg: &ScarlletConfig) -> CoreEvent {
         Some(provider) => CoreEvent {
             payload: Some(core_event::Payload::ProviderInfo(ProviderInfoEvent {
                 provider_name: provider.name.clone(),
-                model: provider.active_model.clone(),
-                reasoning_effort: provider.reasoning_effort.clone().unwrap_or_default(),
+                model: provider.model.clone(),
+                reasoning_effort: provider
+                    .reasoning_effort()
+                    .unwrap_or_default()
+                    .to_string(),
             })),
         },
         None => CoreEvent {
@@ -538,7 +615,10 @@ async fn route_prompt(
                 payload: Some(core_event::Payload::AgentResponse(AgentResponseEvent {
                     task_id: tid.clone(),
                     agent_name: task.agent_name.clone(),
-                    content: "Task completed.".into(),
+                    blocks: vec![AgentBlock {
+                        block_type: "text".into(),
+                        content: "Task completed.".into(),
+                    }],
                 })),
             },
             tasks::TaskStatus::Failed => CoreEvent {

@@ -1,11 +1,10 @@
-mod content_parser;
 mod git_info;
 
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use content_parser::{parse_blocks, ContentBlock};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -30,6 +29,30 @@ enum Focus {
     History,
 }
 
+#[derive(Clone, PartialEq)]
+enum ToolCallStatus {
+    Running,
+    Done,
+    Failed,
+}
+
+struct ToolCallData {
+    #[allow(dead_code)]
+    call_id: String,
+    tool_name: String,
+    arguments_preview: String,
+    status: ToolCallStatus,
+    started_at: Instant,
+    duration_ms: u64,
+    result: String,
+}
+
+enum DisplayBlock {
+    Thought(String),
+    Text(String),
+    ToolCallRef(String),
+}
+
 enum ChatEntry {
     User {
         text: String,
@@ -37,9 +60,15 @@ enum ChatEntry {
     Agent {
         name: String,
         task_id: String,
-        content: String,
-        visible_len: usize,
+        blocks: Vec<DisplayBlock>,
+        visible_chars: usize,
         done: bool,
+    },
+    Debug {
+        source: String,
+        level: String,
+        message: String,
+        timestamp: String,
     },
     System {
         text: String,
@@ -56,11 +85,13 @@ const ENV_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 struct App {
     route: Route,
     messages: Vec<ChatEntry>,
+    tool_calls: HashMap<String, ToolCallData>,
     input: String,
     cursor_pos: usize,
     input_locked: bool,
     focus: Focus,
     scroll_offset: u16,
+    max_scroll: u16,
     tick: u64,
     stream_closed: bool,
     message_tx: mpsc::Sender<TuiMessage>,
@@ -71,6 +102,17 @@ struct App {
     cwd_display: String,
     git_info: Option<git_info::GitInfo>,
     last_env_refresh: Instant,
+    debug_enabled: bool,
+}
+
+fn total_block_chars(blocks: &[DisplayBlock]) -> usize {
+    blocks
+        .iter()
+        .map(|b| match b {
+            DisplayBlock::Thought(t) | DisplayBlock::Text(t) => t.chars().count(),
+            DisplayBlock::ToolCallRef(_) => 0,
+        })
+        .sum()
 }
 
 impl App {
@@ -81,11 +123,13 @@ impl App {
         Self {
             route: Route::Connecting { tick: 0 },
             messages: Vec::new(),
+            tool_calls: HashMap::new(),
             input: String::new(),
             cursor_pos: 0,
             input_locked: false,
             focus: Focus::Input,
             scroll_offset: 0,
+            max_scroll: 0,
             tick: 0,
             stream_closed: false,
             message_tx,
@@ -96,6 +140,9 @@ impl App {
             cwd_display,
             git_info: git,
             last_env_refresh: Instant::now(),
+            debug_enabled: std::env::var("SCARLLET_DEBUG")
+                .map(|v| v == "true")
+                .unwrap_or(false),
         }
     }
 
@@ -129,23 +176,18 @@ impl App {
         }
         for entry in &mut self.messages {
             if let ChatEntry::Agent {
-                content,
-                visible_len,
+                blocks,
+                visible_chars,
                 done,
                 ..
             } = entry
             {
-                if *visible_len < content.len() {
-                    let remaining = &content[*visible_len..];
-                    let advance: usize = remaining
-                        .chars()
-                        .take(TYPEWRITER_CHARS_PER_TICK)
-                        .map(|c| c.len_utf8())
-                        .sum();
-                    *visible_len += advance;
+                let total = total_block_chars(blocks);
+                if *visible_chars < total {
+                    *visible_chars = (*visible_chars + TYPEWRITER_CHARS_PER_TICK).min(total);
                 }
                 if *done {
-                    *visible_len = content.len();
+                    *visible_chars = total;
                 }
             }
         }
@@ -155,6 +197,10 @@ impl App {
         self.messages
             .iter()
             .any(|e| matches!(e, ChatEntry::Agent { done: false, .. }))
+            || self
+                .tool_calls
+                .values()
+                .any(|tc| tc.status == ToolCallStatus::Running)
     }
 
     fn push_message(&mut self, entry: ChatEntry) {
@@ -206,7 +252,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        terminal.draw(|f| routes(f, &app))?;
+        terminal.draw(|f| routes(f, &mut app))?;
 
         let poll_ms = if app.is_streaming() { 50 } else { 200 };
         if event::poll(Duration::from_millis(poll_ms))? {
@@ -355,6 +401,18 @@ fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     false
 }
 
+fn proto_blocks_to_display(proto_blocks: &[AgentBlock]) -> Vec<DisplayBlock> {
+    proto_blocks
+        .iter()
+        .filter(|b| !b.content.is_empty() || b.block_type == "tool_call_ref")
+        .map(|b| match b.block_type.as_str() {
+            "thought" => DisplayBlock::Thought(b.content.clone()),
+            "tool_call_ref" => DisplayBlock::ToolCallRef(b.content.clone()),
+            _ => DisplayBlock::Text(b.content.clone()),
+        })
+        .collect()
+}
+
 fn handle_core_event(app: &mut App, event: CoreEvent) {
     let Some(payload) = event.payload else {
         return;
@@ -368,29 +426,29 @@ fn handle_core_event(app: &mut App, event: CoreEvent) {
             app.push_message(ChatEntry::Agent {
                 name: e.agent_name,
                 task_id: e.task_id,
-                content: String::new(),
-                visible_len: 0,
+                blocks: Vec::new(),
+                visible_chars: 0,
                 done: false,
             });
         }
         core_event::Payload::AgentThinking(e) => {
             if let Some(entry) = find_agent_entry(&mut app.messages, &e.task_id) {
-                if let ChatEntry::Agent { content, .. } = entry {
-                    *content = e.content;
+                if let ChatEntry::Agent { blocks, .. } = entry {
+                    *blocks = proto_blocks_to_display(&e.blocks);
                 }
             }
         }
         core_event::Payload::AgentResponse(e) => {
             if let Some(entry) = find_agent_entry(&mut app.messages, &e.task_id) {
                 if let ChatEntry::Agent {
-                    content,
-                    visible_len,
+                    blocks,
+                    visible_chars,
                     done,
                     ..
                 } = entry
                 {
-                    *content = e.content;
-                    *visible_len = content.len();
+                    *blocks = proto_blocks_to_display(&e.blocks);
+                    *visible_chars = total_block_chars(blocks);
                     *done = true;
                 }
             }
@@ -413,6 +471,50 @@ fn handle_core_event(app: &mut App, event: CoreEvent) {
             app.input_locked = false;
             app.focus = Focus::Input;
         }
+        core_event::Payload::AgentToolCall(e) => {
+            let status = match e.status.as_str() {
+                "done" => ToolCallStatus::Done,
+                "failed" => ToolCallStatus::Failed,
+                _ => ToolCallStatus::Running,
+            };
+
+            if let Some(tc) = app.tool_calls.get_mut(&e.call_id) {
+                tc.status = status;
+                tc.duration_ms = e.duration_ms;
+                tc.result = e.result;
+            } else {
+                app.tool_calls.insert(
+                    e.call_id.clone(),
+                    ToolCallData {
+                        call_id: e.call_id,
+                        tool_name: e.tool_name,
+                        arguments_preview: e.arguments_preview,
+                        status,
+                        started_at: Instant::now(),
+                        duration_ms: e.duration_ms,
+                        result: e.result,
+                    },
+                );
+            }
+        }
+        core_event::Payload::DebugLog(e) => {
+            if !app.debug_enabled {
+                return;
+            }
+            let secs = e.timestamp_ms / 1000;
+            let millis = e.timestamp_ms % 1000;
+            let naive =
+                chrono::DateTime::from_timestamp(secs as i64, (millis * 1_000_000) as u32)
+                    .map(|dt| dt.format("%H:%M:%S%.3f").to_string())
+                    .unwrap_or_else(|| format!("{}ms", e.timestamp_ms));
+
+            app.push_message(ChatEntry::Debug {
+                source: e.source,
+                level: e.level,
+                message: e.message,
+                timestamp: naive,
+            });
+        }
         core_event::Payload::System(e) => {
             app.push_message(ChatEntry::System { text: e.message });
         }
@@ -434,7 +536,7 @@ fn find_agent_entry<'a>(
         .find(|entry| matches!(entry, ChatEntry::Agent { task_id, .. } if task_id == target_id))
 }
 
-fn routes(frame: &mut Frame, app: &App) {
+fn routes(frame: &mut Frame, app: &mut App) {
     match &app.route {
         Route::Connecting { tick } => draw_connecting(frame, *tick),
         Route::Chat => draw_chat(frame, app),
@@ -493,7 +595,7 @@ fn focused_border_style(focused: bool) -> Style {
     }
 }
 
-fn draw_chat(frame: &mut Frame, app: &App) {
+fn draw_chat(frame: &mut Frame, app: &mut App) {
     let total_height = frame.area().height;
     let max_input_lines = (total_height as u32 * 35 / 100).max(1) as u16;
     let border_h = 2u16;
@@ -523,17 +625,124 @@ fn thinking_dots(tick: u64) -> &'static str {
     }
 }
 
-fn draw_history(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn render_tool_call_lines(tc: &ToolCallData, lines: &mut Vec<Line>, width: u16) {
+    let ToolCallData {
+        tool_name,
+        arguments_preview,
+        status,
+        started_at,
+        duration_ms,
+        result,
+        ..
+    } = tc;
+
+    let border = Span::styled("│ ", Style::default().fg(Color::Rgb(100, 60, 140)));
+    let content_w = width.saturating_sub(2) as usize;
+
+    let title = format!("{tool_name} - {arguments_preview}");
+    let title_style = Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::BOLD);
+    let title_lines = vec![Line::from(Span::styled(title, title_style))];
+    lines.extend(prepend_border(title_lines, border.clone(), content_w));
+
+    if !result.is_empty() {
+        let first_line = result.lines().next().unwrap_or("");
+        let result_style = Style::default().fg(Color::DarkGray);
+        let result_lines = vec![Line::from(Span::styled(
+            first_line.to_string(),
+            result_style,
+        ))];
+        lines.extend(prepend_border(result_lines, border.clone(), content_w));
+    }
+
+    let (status_text, status_style) = match status {
+        ToolCallStatus::Running => {
+            let elapsed_secs = started_at.elapsed().as_secs();
+            (
+                format!("running for {elapsed_secs}s..."),
+                Style::default().fg(Color::Blue),
+            )
+        }
+        ToolCallStatus::Done => {
+            let secs = *duration_ms / 1000;
+            (
+                format!("ran for {secs}s."),
+                Style::default().fg(Color::Rgb(0, 160, 0)),
+            )
+        }
+        ToolCallStatus::Failed => {
+            let secs = *duration_ms / 1000;
+            (
+                format!("failed after {secs}s."),
+                Style::default().fg(Color::LightRed),
+            )
+        }
+    };
+    let status_lines = vec![Line::from(Span::styled(status_text, status_style))];
+    lines.extend(prepend_border(status_lines, border, content_w));
+}
+
+/// Takes lines produced by markdown rendering and prepends a left-border span to each,
+/// re-wrapping content so continuation lines also get the border.
+fn prepend_border<'a>(
+    src_lines: Vec<Line<'a>>,
+    border: Span<'a>,
+    content_width: usize,
+) -> Vec<Line<'a>> {
+    let mut out = Vec::new();
+    for line in src_lines {
+        let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let plain_chars: Vec<char> = plain.chars().collect();
+
+        if plain_chars.is_empty() {
+            out.push(Line::from(vec![border.clone()]));
+            continue;
+        }
+
+        let style = if line.spans.len() == 1 {
+            line.spans[0].style
+        } else {
+            Style::default()
+        };
+
+        if plain_chars.len() <= content_width {
+            let mut spans = vec![border.clone()];
+            spans.extend(line.spans);
+            out.push(Line::from(spans));
+        } else {
+            for chunk in plain_chars.chunks(content_width) {
+                let text: String = chunk.iter().collect();
+                out.push(Line::from(vec![
+                    border.clone(),
+                    Span::styled(text, style),
+                ]));
+            }
+        }
+    }
+    out
+}
+
+fn byte_offset_for_chars(s: &str, max_chars: usize) -> usize {
+    s.char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
+}
+
+fn draw_history(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let block = Block::default()
         .borders(Borders::LEFT)
         .border_style(focused_border_style(app.focus == Focus::History))
         .padding(Padding::left(1));
 
+    let inner = block.inner(area);
+
     if app.messages.is_empty() {
         let welcome = Paragraph::new(vec![
             Line::raw(""),
             Line::styled(
-                "  Welcome to Scarllet. Type a message to begin.",
+                "Welcome to Scarllet. Type a message to begin.",
                 Style::default().fg(Color::DarkGray),
             ),
         ])
@@ -563,8 +772,8 @@ fn draw_history(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             ChatEntry::Agent {
                 name,
                 task_id,
-                content,
-                visible_len,
+                blocks,
+                visible_chars,
                 done,
             } => {
                 let id_short = &task_id[..8.min(task_id.len())];
@@ -576,25 +785,57 @@ fn draw_history(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                         .add_modifier(Modifier::BOLD),
                 )));
 
-                let visible = &content[..*visible_len];
-                let blocks = parse_blocks(visible);
+                lines.push(Line::styled("", Style::default().fg(Color::DarkGray)));
+
+                let mut chars_budget = *visible_chars;
                 for (bi, blk) in blocks.iter().enumerate() {
                     if bi > 0 {
                         lines.push(Line::raw(""));
                     }
                     match blk {
-                        ContentBlock::Thought(text) => {
-                            let md = tui_markdown::from_str(text);
-                            for line in md.lines {
-                                let dimmed_spans: Vec<Span> =
-                                    line.spans.into_iter().map(|s| s.dark_gray()).collect();
-                                lines.push(Line::from(dimmed_spans));
+                        DisplayBlock::Thought(text) => {
+                            if chars_budget == 0 {
+                                break;
                             }
+                            let char_count = text.chars().count();
+                            let take = chars_budget.min(char_count);
+                            let visible_end = byte_offset_for_chars(text, take);
+                            let visible = &text[..visible_end];
+                            chars_budget -= take;
+                            let border = Span::styled(
+                                "│ ",
+                                Style::default().fg(Color::DarkGray),
+                            );
+                            let content_w = inner.width.saturating_sub(2) as usize;
+                            let md = tui_markdown::from_str(visible);
+                            let dimmed: Vec<Line> = md
+                                .lines
+                                .into_iter()
+                                .map(|l| {
+                                    let spans: Vec<Span> =
+                                        l.spans.into_iter().map(|s| s.dark_gray()).collect();
+                                    Line::from(spans)
+                                })
+                                .collect();
+                            lines.extend(prepend_border(dimmed, border, content_w));
                         }
-                        ContentBlock::Response(text) => {
-                            let md = tui_markdown::from_str(text);
+                        DisplayBlock::Text(text) => {
+                            if chars_budget == 0 {
+                                break;
+                            }
+                            let char_count = text.chars().count();
+                            let take = chars_budget.min(char_count);
+                            let visible_end = byte_offset_for_chars(text, take);
+                            let visible = &text[..visible_end];
+                            chars_budget -= take;
+                            let md = tui_markdown::from_str(visible);
                             for line in md.lines {
                                 lines.push(line);
+                            }
+                        }
+                        DisplayBlock::ToolCallRef(call_id) => {
+                            if let Some(tc) = app.tool_calls.get(call_id) {
+                                render_tool_call_lines(tc, &mut lines, inner.width);
                             }
                         }
                     }
@@ -608,6 +849,23 @@ fn draw_history(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     ));
                 }
             }
+            ChatEntry::Debug {
+                source,
+                level,
+                message,
+                timestamp,
+            } => {
+                let level_style = match level.as_str() {
+                    "error" => Style::default().fg(Color::LightRed),
+                    "warn" => Style::default().fg(Color::Yellow),
+                    _ => Style::default().fg(Color::DarkGray),
+                };
+                let label = format!("{level} - {timestamp} [{source}]: ");
+                lines.push(Line::from(vec![
+                    Span::styled(label, level_style),
+                    Span::styled(message.to_string(), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
             ChatEntry::System { text } => {
                 lines.push(Line::styled(
                     format!("System: {text}"),
@@ -617,13 +875,14 @@ fn draw_history(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         }
     }
 
-    let inner = block.inner(area);
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     let total_lines = paragraph.line_count(inner.width) as u16;
     let viewport_height = inner.height;
 
     let max_scroll = total_lines.saturating_sub(viewport_height);
-    let scroll_y = max_scroll.saturating_sub(app.scroll_offset);
+    app.max_scroll = max_scroll;
+    app.scroll_offset = app.scroll_offset.min(max_scroll);
+    let scroll_y = max_scroll - app.scroll_offset;
 
     let paragraph = paragraph.block(block).scroll((scroll_y, 0));
     frame.render_widget(paragraph, area);
@@ -749,8 +1008,6 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Some(format!("{} · {}", app.model, app.reasoning_effort))
     };
 
-    // Build right side segments (dropped first during truncation)
-    // Order: [provider, sep, model] — model dropped first, then provider
     let mut right_parts: Vec<String> = Vec::new();
     if let Some(ref prov) = right_provider {
         right_parts.push(prov.clone());
@@ -769,12 +1026,6 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     let gap = 2usize;
 
-    // Determine what fits by dropping right-to-left:
-    // 1. Try everything
-    // 2. Drop model (keep provider only)
-    // 3. Drop all right side
-    // 4. Drop git info
-    // 5. Truncate cwd
     let (left_out, right_out) =
         if !right_str.is_empty() && left_full.len() + gap + right_str.len() <= width {
             (left_full, right_str)
