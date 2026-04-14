@@ -19,6 +19,10 @@ Copy-Item (Join-Path $cargoRelease "scarllet-core.exe") (Join-Path $releaseDir "
 Copy-Item (Join-Path $cargoRelease "scarllet-tui.exe") (Join-Path $releaseDir "tui.exe")
 Copy-Item (Join-Path $cargoRelease "default-agent.exe") (Join-Path $agentsDir "default.exe")
 Copy-Item (Join-Path $cargoRelease "terminal-tool.exe") (Join-Path $toolsDir "terminal.exe")
+Copy-Item (Join-Path $cargoRelease "find-tool.exe") (Join-Path $toolsDir "find.exe")
+Copy-Item (Join-Path $cargoRelease "grep-tool.exe") (Join-Path $toolsDir "grep.exe")
+Copy-Item (Join-Path $cargoRelease "edit-tool.exe") (Join-Path $toolsDir "edit.exe")
+Copy-Item (Join-Path $cargoRelease "write-tool.exe") (Join-Path $toolsDir "write.exe")
 
 Write-Host "Release folder created at: $releaseDir"
 Get-ChildItem -Recurse $releaseDir | ForEach-Object {

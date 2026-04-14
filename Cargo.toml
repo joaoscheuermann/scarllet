@@ -8,6 +8,10 @@ members = [
   "packages/rust/scarllet-llm",
   "packages/rust/agents/default",
   "packages/rust/tools/terminal",
+  "packages/rust/tools/find",
+  "packages/rust/tools/grep",
+  "packages/rust/tools/edit",
+  "packages/rust/tools/write",
 ]
 
 [profile.release]

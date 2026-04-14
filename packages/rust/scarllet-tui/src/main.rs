@@ -927,7 +927,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         return;
     }
 
-    let prefix = Paragraph::new(Line::styled("$ ", Style::default().fg(Color::White)));
+    let prefix = Paragraph::new(Line::styled("> ", Style::default().fg(Color::White)));
     frame.render_widget(prefix, prefix_area);
 
     let input_lines: Vec<&str> = app.input.split('\n').collect();
