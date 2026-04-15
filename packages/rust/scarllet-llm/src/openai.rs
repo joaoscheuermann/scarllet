@@ -4,6 +4,26 @@ use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
+const KNOWN_ENDPOINT_SUFFIXES: &[&str] = &["/chat/completions", "/completions", "/models"];
+
+/// Strips trailing slashes and known endpoint paths so users can paste the full
+/// URL from documentation (e.g. `https://openrouter.ai/api/v1/chat/completions`)
+/// and still get a valid base URL (`https://openrouter.ai/api/v1`).
+fn normalize_base_url(url: &str) -> String {
+    let mut url = url.trim().to_string();
+    for suffix in KNOWN_ENDPOINT_SUFFIXES {
+        if let Some(stripped) = url.strip_suffix(suffix) {
+            tracing::warn!(
+                "api_url contained endpoint path '{}', stripping it — use the base URL instead (e.g. https://openrouter.ai/api/v1)",
+                suffix,
+            );
+            url = stripped.to_string();
+            break;
+        }
+    }
+    url.trim_end_matches('/').to_string()
+}
+
 pub struct OpenAiProvider {
     api_key: String,
     base_url: String,
@@ -17,11 +37,55 @@ impl OpenAiProvider {
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_default();
+        let base_url = normalize_base_url(&base_url);
         Self {
             api_key,
             base_url,
             http,
         }
+    }
+
+    pub fn validate(&self) -> Result<(), LlmError> {
+        if self.base_url.is_empty() {
+            return Err(LlmError::InvalidConfig(
+                "api_url is empty — set it to the provider's base URL (e.g. https://openrouter.ai/api/v1)".into(),
+            ));
+        }
+        if !self.base_url.starts_with("http://") && !self.base_url.starts_with("https://") {
+            return Err(LlmError::InvalidConfig(format!(
+                "api_url must start with http:// or https://, got: {}",
+                self.base_url,
+            )));
+        }
+        if self.api_key.is_empty() {
+            return Err(LlmError::InvalidConfig("api_key is empty".into()));
+        }
+        Ok(())
+    }
+
+    async fn get_context_window_from_list(&self, model: &str) -> Result<u32, LlmError> {
+        let url = format!("{}/models", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            tracing::debug!("GET {url} returned {}, cannot determine context window", resp.status());
+            return Ok(0);
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| LlmError::InvalidResponse(e.to_string()))?;
+
+        Ok(find_model_in_response(&body, model)
+            .and_then(extract_context_length)
+            .unwrap_or(0))
     }
 
     fn build_oai_messages(messages: &[ChatMessage]) -> Vec<OaiMessage> {
@@ -58,7 +122,7 @@ impl OpenAiProvider {
     fn resolve_reasoning(
         reasoning_effort: Option<String>,
         extra_body: &Option<serde_json::Value>,
-    ) -> Option<String> {
+    ) -> Option<OaiReasoningConfig> {
         let has_thinking_config = extra_body
             .as_ref()
             .and_then(|v| v.get("google"))
@@ -68,9 +132,14 @@ impl OpenAiProvider {
         if has_thinking_config {
             None
         } else {
-            reasoning_effort
+            reasoning_effort.map(|effort| OaiReasoningConfig { effort })
         }
     }
+}
+
+#[derive(Serialize)]
+struct OaiReasoningConfig {
+    effort: String,
 }
 
 #[derive(Serialize)]
@@ -86,7 +155,7 @@ struct OaiRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<OaiStreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_effort: Option<String>,
+    reasoning: Option<OaiReasoningConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     extra_body: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -153,6 +222,10 @@ struct OaiChoiceMessage {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
     tool_calls: Option<Vec<OaiToolCall>>,
 }
 
@@ -181,6 +254,8 @@ struct OaiStreamDelta {
     content: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<OaiStreamToolCall>>,
 }
@@ -284,6 +359,28 @@ fn convert_tools(tools: &Option<Vec<ToolDefinition>>) -> Option<Vec<OaiToolDef>>
     })
 }
 
+/// Extracts `context_length` or `context_window` from a single model JSON object,
+/// falling back to `top_provider.context_length` (OpenRouter-specific).
+fn extract_context_length(obj: &serde_json::Value) -> Option<u32> {
+    obj.get("context_length")
+        .or_else(|| obj.get("context_window"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            obj.get("top_provider")
+                .and_then(|tp| tp.get("context_length"))
+                .and_then(|v| v.as_u64())
+        })
+        .map(|v| v as u32)
+        .filter(|&v| v > 0)
+}
+
+/// Finds a model by `id` inside a `{ "data": [...] }` wrapper response.
+fn find_model_in_response<'a>(body: &'a serde_json::Value, model: &str) -> Option<&'a serde_json::Value> {
+    body.get("data")
+        .and_then(|d| d.as_array())
+        .and_then(|arr| arr.iter().find(|m| m.get("id").and_then(|v| v.as_str()) == Some(model)))
+}
+
 fn parse_stream_chunk(data: &str) -> Option<ChatStreamEvent> {
     let chunk: OaiStreamChunk = serde_json::from_str(data).ok()?;
 
@@ -306,7 +403,11 @@ fn parse_stream_chunk(data: &str) -> Option<ChatStreamEvent> {
     };
 
     let content = choice.delta.content.unwrap_or_default();
-    let reasoning = choice.delta.reasoning_content.unwrap_or_default();
+    let reasoning = choice
+        .delta
+        .reasoning_content
+        .or(choice.delta.reasoning)
+        .unwrap_or_default();
 
     let mut deltas = Vec::new();
     if !reasoning.is_empty() {
@@ -385,6 +486,7 @@ fn spawn_sse_reader(resp: reqwest::Response) -> ChatStream {
 #[async_trait::async_trait]
 impl LlmProvider for OpenAiProvider {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.validate()?;
         let reasoning = Self::resolve_reasoning(request.reasoning_effort, &request.extra_body);
         let tools = convert_tools(&request.tools);
         let oai_req = OaiRequest {
@@ -394,7 +496,7 @@ impl LlmProvider for OpenAiProvider {
             max_tokens: request.max_tokens,
             stream: false,
             stream_options: None,
-            reasoning_effort: reasoning,
+            reasoning,
             extra_body: request.extra_body,
             tools,
         };
@@ -454,15 +556,26 @@ impl LlmProvider for OpenAiProvider {
                 .collect()
         });
 
+        let reasoning_text = choice
+            .message
+            .reasoning_content
+            .or(choice.message.reasoning)
+            .unwrap_or_default();
         let content_text = choice.message.content.unwrap_or_default();
-        let blocks = if content_text.is_empty() {
-            Vec::new()
-        } else {
-            vec![ContentBlock {
+
+        let mut blocks = Vec::new();
+        if !reasoning_text.is_empty() {
+            blocks.push(ContentBlock {
+                block_type: ContentBlockType::Thought,
+                text: reasoning_text,
+            });
+        }
+        if !content_text.is_empty() {
+            blocks.push(ContentBlock {
                 block_type: ContentBlockType::Text,
                 text: content_text.clone(),
-            }]
-        };
+            });
+        }
 
         Ok(ChatResponse {
             message: ChatMessage {
@@ -478,6 +591,7 @@ impl LlmProvider for OpenAiProvider {
     }
 
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
+        self.validate()?;
         let reasoning = Self::resolve_reasoning(request.reasoning_effort, &request.extra_body);
         let tools = convert_tools(&request.tools);
         let oai_req = OaiRequest {
@@ -487,7 +601,7 @@ impl LlmProvider for OpenAiProvider {
             max_tokens: request.max_tokens,
             stream: true,
             stream_options: Some(OaiStreamOptions { include_usage: true }),
-            reasoning_effort: reasoning,
+            reasoning,
             extra_body: request.extra_body,
             tools,
         };
@@ -527,7 +641,8 @@ impl LlmProvider for OpenAiProvider {
             .map_err(|e| LlmError::NetworkError(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Ok(0);
+            tracing::debug!("GET {url} returned {}, falling back to /models list", resp.status());
+            return self.get_context_window_from_list(model).await;
         }
 
         let body: serde_json::Value = resp
@@ -535,13 +650,17 @@ impl LlmProvider for OpenAiProvider {
             .await
             .map_err(|e| LlmError::InvalidResponse(e.to_string()))?;
 
-        let ctx = body
-            .get("context_window")
-            .or_else(|| body.get("context_length"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+        if let Some(ctx) = extract_context_length(&body) {
+            return Ok(ctx);
+        }
 
-        Ok(ctx)
+        if let Some(model_obj) = find_model_in_response(&body, model) {
+            if let Some(ctx) = extract_context_length(model_obj) {
+                return Ok(ctx);
+            }
+        }
+
+        Ok(0)
     }
 }
 
@@ -586,11 +705,83 @@ mod tests {
     }
 
     #[test]
-    fn parse_reasoning_as_thought_delta() {
+    fn parse_reasoning_content_as_thought_delta() {
         let data = r#"{"choices":[{"delta":{"reasoning_content":"thinking...","content":""},"finish_reason":null}]}"#;
         let event = parse_stream_chunk(data).unwrap();
         assert_eq!(event.deltas.len(), 1);
         assert!(matches!(&event.deltas[0], StreamDelta::Thought(t) if t == "thinking..."));
+    }
+
+    #[test]
+    fn parse_reasoning_field_as_thought_delta() {
+        let data = r#"{"choices":[{"delta":{"reasoning":"step by step...","content":""},"finish_reason":null}]}"#;
+        let event = parse_stream_chunk(data).unwrap();
+        assert_eq!(event.deltas.len(), 1);
+        assert!(matches!(&event.deltas[0], StreamDelta::Thought(t) if t == "step by step..."));
+    }
+
+    #[test]
+    fn parse_reasoning_content_preferred_over_reasoning() {
+        let data = r#"{"choices":[{"delta":{"reasoning_content":"native","reasoning":"normalized","content":""},"finish_reason":null}]}"#;
+        let event = parse_stream_chunk(data).unwrap();
+        assert_eq!(event.deltas.len(), 1);
+        assert!(matches!(&event.deltas[0], StreamDelta::Thought(t) if t == "native"));
+    }
+
+    #[test]
+    fn resolve_reasoning_builds_config() {
+        let config = OpenAiProvider::resolve_reasoning(Some("high".into()), &None);
+        assert!(config.is_some());
+        let json = serde_json::to_value(config.unwrap()).unwrap();
+        assert_eq!(json, serde_json::json!({"effort": "high"}));
+    }
+
+    #[test]
+    fn resolve_reasoning_none_when_no_effort() {
+        let config = OpenAiProvider::resolve_reasoning(None, &None);
+        assert!(config.is_none());
+    }
+
+    #[test]
+    fn resolve_reasoning_none_with_google_thinking_config() {
+        let extra = Some(serde_json::json!({"google": {"thinking_config": {}}}));
+        let config = OpenAiProvider::resolve_reasoning(Some("high".into()), &extra);
+        assert!(config.is_none());
+    }
+
+    #[test]
+    fn oai_request_serializes_reasoning_object() {
+        let req = OaiRequest {
+            model: "test".into(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            stream: false,
+            stream_options: None,
+            reasoning: Some(OaiReasoningConfig { effort: "high".into() }),
+            extra_body: None,
+            tools: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["reasoning"], serde_json::json!({"effort": "high"}));
+        assert!(json.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn oai_request_omits_reasoning_when_none() {
+        let req = OaiRequest {
+            model: "test".into(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            stream: false,
+            stream_options: None,
+            reasoning: None,
+            extra_body: None,
+            tools: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("reasoning").is_none());
     }
 
     #[test]
@@ -625,5 +816,166 @@ mod tests {
             r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
         let event = parse_stream_chunk(data).unwrap();
         assert_eq!(event.finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    #[test]
+    fn normalize_strips_chat_completions_suffix() {
+        assert_eq!(
+            normalize_base_url("https://openrouter.ai/api/v1/chat/completions"),
+            "https://openrouter.ai/api/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_trailing_slash() {
+        assert_eq!(
+            normalize_base_url("https://openrouter.ai/api/v1/"),
+            "https://openrouter.ai/api/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_multiple_trailing_slashes() {
+        assert_eq!(
+            normalize_base_url("https://openrouter.ai/api/v1///"),
+            "https://openrouter.ai/api/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_completions_suffix() {
+        assert_eq!(
+            normalize_base_url("https://api.openai.com/v1/completions"),
+            "https://api.openai.com/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_models_suffix() {
+        assert_eq!(
+            normalize_base_url("https://api.openai.com/v1/models"),
+            "https://api.openai.com/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_correct_base_url() {
+        assert_eq!(
+            normalize_base_url("https://openrouter.ai/api/v1"),
+            "https://openrouter.ai/api/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_trims_whitespace() {
+        assert_eq!(
+            normalize_base_url("  https://openrouter.ai/api/v1  "),
+            "https://openrouter.ai/api/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_handles_localhost() {
+        assert_eq!(
+            normalize_base_url("http://localhost:11434/v1/"),
+            "http://localhost:11434/v1"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_url() {
+        let p = OpenAiProvider::new("sk-test".into(), "".into());
+        assert!(matches!(p.validate(), Err(LlmError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn validate_rejects_missing_scheme() {
+        let p = OpenAiProvider::new("sk-test".into(), "openrouter.ai/api/v1".into());
+        assert!(matches!(p.validate(), Err(LlmError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn validate_rejects_empty_api_key() {
+        let p = OpenAiProvider::new("".into(), "https://openrouter.ai/api/v1".into());
+        assert!(matches!(p.validate(), Err(LlmError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn validate_accepts_valid_config() {
+        let p = OpenAiProvider::new("sk-test".into(), "https://openrouter.ai/api/v1".into());
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn extract_context_length_from_flat_object() {
+        let body = serde_json::json!({"id": "gpt-4", "context_length": 128000});
+        assert_eq!(extract_context_length(&body), Some(128000));
+    }
+
+    #[test]
+    fn extract_context_length_from_context_window_field() {
+        let body = serde_json::json!({"id": "gpt-4", "context_window": 64000});
+        assert_eq!(extract_context_length(&body), Some(64000));
+    }
+
+    #[test]
+    fn extract_context_length_from_top_provider() {
+        let body = serde_json::json!({
+            "id": "qwen/qwen3.6-plus",
+            "top_provider": {"context_length": 131072}
+        });
+        assert_eq!(extract_context_length(&body), Some(131072));
+    }
+
+    #[test]
+    fn extract_context_length_prefers_root_over_top_provider() {
+        let body = serde_json::json!({
+            "id": "model",
+            "context_length": 200000,
+            "top_provider": {"context_length": 100000}
+        });
+        assert_eq!(extract_context_length(&body), Some(200000));
+    }
+
+    #[test]
+    fn extract_context_length_none_when_missing() {
+        let body = serde_json::json!({"id": "model"});
+        assert_eq!(extract_context_length(&body), None);
+    }
+
+    #[test]
+    fn extract_context_length_none_when_zero() {
+        let body = serde_json::json!({"id": "model", "context_length": 0});
+        assert_eq!(extract_context_length(&body), None);
+    }
+
+    #[test]
+    fn find_model_in_data_array() {
+        let body = serde_json::json!({
+            "data": [
+                {"id": "model-a", "context_length": 4096},
+                {"id": "qwen/qwen3.6-plus", "context_length": 131072},
+                {"id": "model-c", "context_length": 8192}
+            ]
+        });
+        let found = find_model_in_response(&body, "qwen/qwen3.6-plus");
+        assert!(found.is_some());
+        assert_eq!(extract_context_length(found.unwrap()), Some(131072));
+    }
+
+    #[test]
+    fn find_model_not_in_data_array() {
+        let body = serde_json::json!({
+            "data": [
+                {"id": "model-a", "context_length": 4096}
+            ]
+        });
+        assert!(find_model_in_response(&body, "missing-model").is_none());
+    }
+
+    #[test]
+    fn find_model_no_data_field() {
+        let body = serde_json::json!({"id": "model-a", "context_length": 4096});
+        assert!(find_model_in_response(&body, "model-a").is_none());
     }
 }
