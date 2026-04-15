@@ -187,6 +187,11 @@ impl InputState {
         (0, 0)
     }
 
+    pub fn is_at_top(&self, wrap_width: u16) -> bool {
+        let (_, row) = self.cursor_visual_position(wrap_width);
+        row == 0
+    }
+
     fn set_selection(&mut self, shift: bool) {
         if shift {
             if self.selection_anchor.is_none() {

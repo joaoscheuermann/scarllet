@@ -1,5 +1,6 @@
 mod git_info;
 mod input;
+mod widgets;
 
 use std::collections::HashMap;
 use std::io;
@@ -8,10 +9,10 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Layout};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    Block, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 use ratatui::Frame;
 use scarllet_proto::proto::core_event;
@@ -25,36 +26,36 @@ use tokio_stream::wrappers::ReceiverStream;
 const TYPEWRITER_CHARS_PER_TICK: usize = 30;
 
 #[derive(Clone, PartialEq)]
-enum Focus {
+pub(crate) enum Focus {
     Input,
     History,
 }
 
 #[derive(Clone, PartialEq)]
-enum ToolCallStatus {
+pub(crate) enum ToolCallStatus {
     Running,
     Done,
     Failed,
 }
 
-struct ToolCallData {
+pub(crate) struct ToolCallData {
     #[allow(dead_code)]
-    call_id: String,
-    tool_name: String,
-    arguments_preview: String,
-    status: ToolCallStatus,
-    started_at: Instant,
-    duration_ms: u64,
-    result: String,
+    pub(crate) call_id: String,
+    pub(crate) tool_name: String,
+    pub(crate) arguments_preview: String,
+    pub(crate) status: ToolCallStatus,
+    pub(crate) started_at: Instant,
+    pub(crate) duration_ms: u64,
+    pub(crate) result: String,
 }
 
-enum DisplayBlock {
+pub(crate) enum DisplayBlock {
     Thought(String),
     Text(String),
     ToolCallRef(String),
 }
 
-enum ChatEntry {
+pub(crate) enum ChatEntry {
     User {
         text: String,
     },
@@ -91,8 +92,8 @@ struct App {
     input_locked: bool,
     focus: Focus,
     wrap_width: u16,
-    scroll_offset: u16,
-    max_scroll: u16,
+    scroll_view_state: widgets::ScrollViewState,
+    focused_message_idx: Option<usize>,
     tick: u64,
     stream_closed: bool,
     message_tx: mpsc::Sender<TuiMessage>,
@@ -131,8 +132,8 @@ impl App {
             input_locked: false,
             focus: Focus::Input,
             wrap_width: 80,
-            scroll_offset: 0,
-            max_scroll: 0,
+            scroll_view_state: widgets::ScrollViewState::new(),
+            focused_message_idx: None,
             tick: 0,
             stream_closed: false,
             message_tx,
@@ -306,12 +307,60 @@ fn find_running_task_id(messages: &[ChatEntry]) -> Option<String> {
     })
 }
 
+fn return_to_input(app: &mut App) {
+    app.focus = Focus::Input;
+    app.focused_message_idx = None;
+}
+
+fn enter_history(app: &mut App) {
+    if !app.messages.is_empty() {
+        app.focus = Focus::History;
+        app.focused_message_idx = Some(app.messages.len() - 1);
+    }
+}
+
 fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return true;
     }
 
     if !matches!(app.route, Route::Chat) {
+        return false;
+    }
+
+    if app.focus == Focus::History {
+        match key.code {
+            KeyCode::Up => {
+                if let Some(idx) = app.focused_message_idx {
+                    if idx > 0 {
+                        app.focused_message_idx = Some(idx - 1);
+                    }
+                }
+            }
+            KeyCode::Down => {
+                if let Some(idx) = app.focused_message_idx {
+                    if idx + 1 < app.messages.len() {
+                        app.focused_message_idx = Some(idx + 1);
+                    } else {
+                        return_to_input(app);
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                return_to_input(app);
+            }
+            KeyCode::Char(c) => {
+                return_to_input(app);
+                app.input_state.insert_char(c);
+            }
+            KeyCode::PageUp => {
+                app.scroll_view_state.offset_y = app.scroll_view_state.offset_y.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                app.scroll_view_state.offset_y += 1;
+            }
+            _ => {}
+        }
         return false;
     }
 
@@ -336,7 +385,7 @@ fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 return true;
             }
             if !trimmed.is_empty() {
-                app.scroll_offset = 0;
+                app.scroll_view_state.scroll_to_bottom();
                 app.push_message(ChatEntry::User {
                     text: trimmed.clone(),
                 });
@@ -364,25 +413,30 @@ fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             app.input_state.insert_str("  ");
             return false;
         } else if key.code == KeyCode::PageUp {
-            let max = app.max_scroll;
-            if app.scroll_offset < max {
-                app.scroll_offset += 1;
-            }
+            app.scroll_view_state.offset_y = app.scroll_view_state.offset_y.saturating_sub(1);
             return false;
         } else if key.code == KeyCode::PageDown {
-            app.scroll_offset = app.scroll_offset.saturating_sub(1);
+            app.scroll_view_state.offset_y += 1;
+            return false;
+        } else if key.code == KeyCode::Up
+            && !has_shift
+            && app.input_state.is_at_top(app.wrap_width)
+            && !app.messages.is_empty()
+        {
+            enter_history(app);
             return false;
         }
 
         app.input_state.handle_key_event(key, app.wrap_width);
     } else {
-        if key.code == KeyCode::Up {
-            let max = app.max_scroll;
-            if app.scroll_offset < max {
-                app.scroll_offset += 1;
+        match key.code {
+            KeyCode::PageUp | KeyCode::Up => {
+                app.scroll_view_state.offset_y = app.scroll_view_state.offset_y.saturating_sub(1);
             }
-        } else if key.code == KeyCode::Down {
-            app.scroll_offset = app.scroll_offset.saturating_sub(1);
+            KeyCode::PageDown | KeyCode::Down => {
+                app.scroll_view_state.offset_y += 1;
+            }
+            _ => {}
         }
     }
 
@@ -442,6 +496,7 @@ fn handle_core_event(app: &mut App, event: CoreEvent) {
             }
             app.input_locked = false;
             app.focus = Focus::Input;
+            app.focused_message_idx = None;
         }
         core_event::Payload::AgentError(e) => {
             if let Some(entry) = find_agent_entry(&mut app.messages, &e.task_id) {
@@ -458,6 +513,7 @@ fn handle_core_event(app: &mut App, event: CoreEvent) {
             });
             app.input_locked = false;
             app.focus = Focus::Input;
+            app.focused_message_idx = None;
         }
         core_event::Payload::AgentToolCall(e) => {
             let status = match e.status.as_str() {
@@ -567,14 +623,6 @@ fn compute_input_height(app: &input::InputState, available_width: u16, max_heigh
     line_count.max(1).min(max_height)
 }
 
-fn focused_border_style(focused: bool) -> Style {
-    if focused {
-        Style::default().fg(Color::Rgb(80, 100, 180))
-    } else {
-        Style::default().fg(Color::Rgb(30, 30, 30))
-    }
-}
-
 fn draw_chat(frame: &mut Frame, app: &mut App) {
     let total_height = frame.area().height;
     let max_input_lines = (total_height as u32 * 30 / 100).max(1) as u16; // 30% of screen as per spec
@@ -595,124 +643,11 @@ fn draw_chat(frame: &mut Frame, app: &mut App) {
     draw_status_bar(frame, app, status_area);
 }
 
-fn thinking_dots(tick: u64) -> &'static str {
-    match (tick / 3) % 4 {
-        1 => ".",
-        2 => "..",
-        3 => "...",
-        _ => "",
-    }
-}
-
-fn render_tool_call_lines(tc: &ToolCallData, lines: &mut Vec<Line>, width: u16) {
-    let ToolCallData {
-        tool_name,
-        arguments_preview,
-        status,
-        started_at,
-        duration_ms,
-        result,
-        ..
-    } = tc;
-
-    let border = Span::styled("│ ", Style::default().fg(Color::Rgb(100, 60, 140)));
-    let content_w = width.saturating_sub(2) as usize;
-
-    let title = format!("{tool_name} - {arguments_preview}");
-    let title_style = Style::default()
-        .fg(Color::Magenta)
-        .add_modifier(Modifier::BOLD);
-    let title_lines = vec![Line::from(Span::styled(title, title_style))];
-    lines.extend(prepend_border(title_lines, border.clone(), content_w));
-
-    if !result.is_empty() {
-        let first_line = result.lines().next().unwrap_or("");
-        let result_style = Style::default().fg(Color::DarkGray);
-        let result_lines = vec![Line::from(Span::styled(
-            first_line.to_string(),
-            result_style,
-        ))];
-        lines.extend(prepend_border(result_lines, border.clone(), content_w));
-    }
-
-    let (status_text, status_style) = match status {
-        ToolCallStatus::Running => {
-            let elapsed_secs = started_at.elapsed().as_secs();
-            (
-                format!("running for {elapsed_secs}s..."),
-                Style::default().fg(Color::Blue),
-            )
-        }
-        ToolCallStatus::Done => {
-            let secs = *duration_ms / 1000;
-            (
-                format!("ran for {secs}s."),
-                Style::default().fg(Color::Rgb(0, 160, 0)),
-            )
-        }
-        ToolCallStatus::Failed => {
-            let secs = *duration_ms / 1000;
-            (
-                format!("failed after {secs}s."),
-                Style::default().fg(Color::LightRed),
-            )
-        }
-    };
-    let status_lines = vec![Line::from(Span::styled(status_text, status_style))];
-    lines.extend(prepend_border(status_lines, border, content_w));
-}
-
-/// Takes lines produced by markdown rendering and prepends a left-border span to each,
-/// re-wrapping content so continuation lines also get the border.
-fn prepend_border<'a>(
-    src_lines: Vec<Line<'a>>,
-    border: Span<'a>,
-    content_width: usize,
-) -> Vec<Line<'a>> {
-    let mut out = Vec::new();
-    for line in src_lines {
-        let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        let plain_chars: Vec<char> = plain.chars().collect();
-
-        if plain_chars.is_empty() {
-            out.push(Line::from(vec![border.clone()]));
-            continue;
-        }
-
-        let style = if line.spans.len() == 1 {
-            line.spans[0].style
-        } else {
-            Style::default()
-        };
-
-        if plain_chars.len() <= content_width {
-            let mut spans = vec![border.clone()];
-            spans.extend(line.spans);
-            out.push(Line::from(spans));
-        } else {
-            for chunk in plain_chars.chunks(content_width) {
-                let text: String = chunk.iter().collect();
-                out.push(Line::from(vec![border.clone(), Span::styled(text, style)]));
-            }
-        }
-    }
-    out
-}
-
-fn byte_offset_for_chars(s: &str, max_chars: usize) -> usize {
-    s.char_indices()
-        .nth(max_chars)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len())
-}
-
 fn draw_history(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    let block = Block::default()
-        .borders(Borders::LEFT)
-        .border_style(focused_border_style(app.focus == Focus::History))
-        .padding(Padding::left(1));
+    let block = Block::default();
 
     let inner = block.inner(area);
+    frame.render_widget(block, area);
 
     if app.messages.is_empty() {
         let welcome = Paragraph::new(vec![
@@ -721,146 +656,57 @@ fn draw_history(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
                 "Welcome to Scarllet. Type a message to begin.",
                 Style::default().fg(Color::DarkGray),
             ),
-        ])
-        .block(block);
-        frame.render_widget(welcome, area);
+        ]);
+        frame.render_widget(welcome, inner);
         return;
     }
 
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, entry) in app.messages.iter().enumerate() {
-        if i > 0 {
-            lines.push(Line::raw(""));
-        }
-        match entry {
-            ChatEntry::User { text } => {
-                lines.push(Line::from(Span::styled(
-                    "You: ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                let md = tui_markdown::from_str(text);
-                for line in md.lines {
-                    lines.push(line);
-                }
-            }
-            ChatEntry::Agent {
-                name,
-                task_id,
-                blocks,
-                visible_chars,
-                done,
-            } => {
-                let id_short = &task_id[..8.min(task_id.len())];
-                let label = format!("{name} ({id_short}): ");
-                lines.push(Line::from(Span::styled(
-                    label,
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                )));
+    use widgets::ScrollItem;
+    let msg_widgets: Vec<widgets::ChatMessageWidget> = app
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            widgets::ChatMessageWidget::new(
+                entry,
+                app.focused_message_idx == Some(i),
+                &app.tool_calls,
+                app.tick,
+                inner.width,
+            )
+        })
+        .collect();
 
-                lines.push(Line::styled("", Style::default().fg(Color::DarkGray)));
-
-                let mut chars_budget = *visible_chars;
-                for (bi, blk) in blocks.iter().enumerate() {
-                    if bi > 0 {
-                        lines.push(Line::raw(""));
-                    }
-                    match blk {
-                        DisplayBlock::Thought(text) => {
-                            if chars_budget == 0 {
-                                break;
-                            }
-                            let char_count = text.chars().count();
-                            let take = chars_budget.min(char_count);
-                            let visible_end = byte_offset_for_chars(text, take);
-                            let visible = &text[..visible_end];
-                            chars_budget -= take;
-                            let border = Span::styled("│ ", Style::default().fg(Color::DarkGray));
-                            let content_w = inner.width.saturating_sub(2) as usize;
-                            let md = tui_markdown::from_str(visible);
-                            let dimmed: Vec<Line> = md
-                                .lines
-                                .into_iter()
-                                .map(|l| {
-                                    let spans: Vec<Span> =
-                                        l.spans.into_iter().map(|s| s.dark_gray()).collect();
-                                    Line::from(spans)
-                                })
-                                .collect();
-                            lines.extend(prepend_border(dimmed, border, content_w));
-                        }
-                        DisplayBlock::Text(text) => {
-                            if chars_budget == 0 {
-                                break;
-                            }
-                            let char_count = text.chars().count();
-                            let take = chars_budget.min(char_count);
-                            let visible_end = byte_offset_for_chars(text, take);
-                            let visible = &text[..visible_end];
-                            chars_budget -= take;
-                            let md = tui_markdown::from_str(visible);
-                            for line in md.lines {
-                                lines.push(line);
-                            }
-                        }
-                        DisplayBlock::ToolCallRef(call_id) => {
-                            if let Some(tc) = app.tool_calls.get(call_id) {
-                                render_tool_call_lines(tc, &mut lines, inner.width);
-                            }
-                        }
-                    }
-                }
-
-                if !done {
-                    let dots = thinking_dots(app.tick);
-                    lines.push(Line::styled(
-                        format!("Working (press ESC to stop) {dots}"),
-                        Style::default().fg(Color::Yellow),
-                    ));
-                }
+    if let Some(idx) = app.focused_message_idx {
+        let gap = 1u16;
+        let mut y = 0u16;
+        for (i, w) in msg_widgets.iter().enumerate() {
+            if i > 0 {
+                y = y.saturating_add(gap);
             }
-            ChatEntry::Debug {
-                source,
-                level,
-                message,
-                timestamp,
-            } => {
-                let level_style = match level.as_str() {
-                    "error" => Style::default().fg(Color::LightRed),
-                    "warn" => Style::default().fg(Color::Yellow),
-                    _ => Style::default().fg(Color::DarkGray),
-                };
-                let label = format!("{level} - {timestamp} [{source}]: ");
-                lines.push(Line::from(vec![
-                    Span::styled(label, level_style),
-                    Span::styled(message.to_string(), Style::default().fg(Color::DarkGray)),
-                ]));
+            if i == idx {
+                app.scroll_view_state
+                    .ensure_visible(y, w.height(), inner.height);
+                break;
             }
-            ChatEntry::System { text } => {
-                lines.push(Line::styled(
-                    format!("System: {text}"),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
+            y = y.saturating_add(w.height());
         }
     }
 
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    let total_lines = paragraph.line_count(inner.width) as u16;
-    let viewport_height = inner.height;
+    let items: Vec<&dyn widgets::ScrollItem> = msg_widgets
+        .iter()
+        .map(|w| w as &dyn widgets::ScrollItem)
+        .collect();
 
-    let max_scroll = total_lines.saturating_sub(viewport_height);
-    app.max_scroll = max_scroll;
-    app.scroll_offset = app.scroll_offset.min(max_scroll);
-    let scroll_y = max_scroll - app.scroll_offset;
+    widgets::ScrollView::render(
+        inner,
+        frame.buffer_mut(),
+        &mut app.scroll_view_state,
+        &items,
+        1,
+    );
 
-    let paragraph = paragraph.block(block).scroll((scroll_y, 0));
-    frame.render_widget(paragraph, area);
-
-    if total_lines > viewport_height {
+    if app.scroll_view_state.content_height > inner.height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .thumb_symbol("┃")
             .track_symbol(Some("│"))
@@ -869,18 +715,18 @@ fn draw_history(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
             .thumb_style(Style::default().fg(Color::DarkGray))
             .track_style(Style::default().fg(Color::Rgb(40, 40, 40)));
 
-        let position = scroll_y as usize;
-        let content_len = max_scroll as usize;
-        let mut scrollbar_state = ScrollbarState::new(content_len).position(position);
+        let max_offset = app
+            .scroll_view_state
+            .content_height
+            .saturating_sub(inner.height) as usize;
+        let position = app.scroll_view_state.offset_y as usize;
+        let mut scrollbar_state = ScrollbarState::new(max_offset).position(position);
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 }
 
 fn draw_input(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    let block = Block::default()
-        .borders(Borders::LEFT)
-        .border_style(focused_border_style(app.focus == Focus::Input))
-        .padding(Padding::left(1));
+    let block = Block::default().padding(Padding::left(1));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
