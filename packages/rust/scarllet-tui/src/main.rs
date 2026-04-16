@@ -136,8 +136,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 break;
                             }
                         }
+
                         Event::Paste(text) => {
                             events::handle_paste(&mut app, &text);
+                        }
+
+                        // Block any mouse event :D
+                        Event::Mouse(_) => {
+                            continue;
                         }
                         _ => {}
                     }
@@ -154,7 +160,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste).ok();
-    crossterm::execute!(std::io::stdout(), crossterm::event::PopKeyboardEnhancementFlags).ok();
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::PopKeyboardEnhancementFlags
+    )
+    .ok();
     ratatui::restore();
     Ok(())
 }

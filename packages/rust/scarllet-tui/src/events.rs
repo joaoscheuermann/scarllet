@@ -32,7 +32,15 @@ pub(crate) fn handle_paste(app: &mut App, text: &str) {
     if !matches!(app.route, Route::Chat) {
         return;
     }
-    let cleaned = text.replace("\r\n", "\n").replace('\r', "\n");
+
+    let cleaned: String = text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+
     if !cleaned.is_empty() {
         insert_text_at_cursor(app, &cleaned);
     }
@@ -64,19 +72,38 @@ fn enter_history(app: &mut App) {
     }
 }
 
+/// Calculates the page-scroll increment as 1/4 of the viewport height.
+fn scroll_page_increment(viewport_height: u16) -> u16 {
+    (viewport_height / 4).max(1)
+}
+
 /// Processes a key event and returns `true` if the application should exit.
 ///
 /// Routes keys to history navigation, cancel-streaming, input editing,
 /// or scroll depending on current focus and application state.
 pub(crate) fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
+    // Guard clause: Ctrl+C always exits
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return true;
     }
 
+    // Guard clause: Esc cancels streaming regardless of focus or route
+    if key.code == KeyCode::Esc && app.is_streaming() {
+        if let Some(task_id) = find_running_task_id(&app.messages) {
+            let msg = TuiMessage {
+                payload: Some(tui_message::Payload::Cancel(CancelPrompt { task_id })),
+            };
+            let _ = app.message_tx.try_send(msg);
+        }
+        return false;
+    }
+
+    // Guard clause: Most keys require Chat route
     if !matches!(app.route, Route::Chat) {
         return false;
     }
 
+    // Handle History focus
     if app.focus == Focus::History {
         match key.code {
             KeyCode::Up => {
@@ -95,105 +122,66 @@ pub(crate) fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bo
                     }
                 }
             }
-            KeyCode::Esc => {
-                return_to_input(app);
-            }
-            KeyCode::Char(c) => {
-                return_to_input(app);
-                app.input_state.insert_char(c);
-            }
-            KeyCode::PageUp => {
-                let page = (app.history_viewport_height * (0.25 as u16)).max(1);
-                scroll_page(&mut app.scroll_view_state, true, page);
-            }
-            KeyCode::PageDown => {
-                let page = (app.history_viewport_height * (0.25 as u16)).max(1);
-                scroll_page(&mut app.scroll_view_state, false, page);
-            }
+            KeyCode::Esc => return_to_input(app),
+            KeyCode::PageUp => scroll_page(&mut app.scroll_view_state, true, scroll_page_increment(app.history_viewport_height)),
+            KeyCode::PageDown => scroll_page(&mut app.scroll_view_state, false, scroll_page_increment(app.history_viewport_height)),
             _ => {}
         }
         return false;
     }
 
-    if key.code == KeyCode::Esc && app.is_streaming() {
-        if let Some(task_id) = find_running_task_id(&app.messages) {
-            let msg = TuiMessage {
-                payload: Some(tui_message::Payload::Cancel(CancelPrompt { task_id })),
-            };
-            let _ = app.message_tx.try_send(msg);
-        }
-        return false;
-    }
-
+    // Handle Input focus
     let input_editable = app.focus == Focus::Input && !app.input_locked;
     let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let page = scroll_page_increment(app.history_viewport_height);
 
     if input_editable {
-        if key.code == KeyCode::Enter && !has_shift && !has_ctrl {
-            let trimmed = app.input_state.text().trim().to_string();
-            if trimmed.eq_ignore_ascii_case("exit") {
-                return true;
-            }
-            if !trimmed.is_empty() {
-                app.scroll_view_state.scroll_to_bottom();
-                app.push_message(ChatEntry::User {
-                    text: trimmed.clone(),
-                });
-                app.input_state.set_text(String::new());
-                app.save_session();
-
-                let msg = TuiMessage {
-                    payload: Some(tui_message::Payload::Prompt(PromptMessage {
-                        text: trimmed,
-                        working_directory: std::env::current_dir()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_default(),
-                    })),
-                };
-                if app.message_tx.try_send(msg).is_err() {
-                    app.push_message(ChatEntry::System {
-                        text: "Connection lost. Please restart the TUI.".into(),
-                    });
+        match key.code {
+            KeyCode::Enter if !has_shift && !has_ctrl => {
+                let trimmed = app.input_state.text().trim().to_string();
+                if trimmed.eq_ignore_ascii_case("exit") {
+                    return true;
+                }
+                if !trimmed.is_empty() {
+                    app.scroll_view_state.scroll_to_bottom();
+                    app.push_message(ChatEntry::User { text: trimmed.clone() });
+                    app.input_state.set_text(String::new());
+                    app.save_session();
+                    let msg = TuiMessage {
+                        payload: Some(tui_message::Payload::Prompt(PromptMessage {
+                            text: trimmed,
+                            working_directory: std::env::current_dir()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_default(),
+                        })),
+                    };
+                    if app.message_tx.try_send(msg).is_err() {
+                        app.push_message(ChatEntry::System {
+                            text: "Connection lost. Please restart the TUI.".into(),
+                        });
+                    }
                 }
             }
-            return false;
-        } else if key.code == KeyCode::Enter && (has_shift || has_ctrl) {
-            app.input_state.insert_char('\n');
-            return false;
-        } else if key.code == KeyCode::Tab {
-            app.input_state.insert_str("  ");
-            return false;
-        } else if key.code == KeyCode::PageUp {
-            let page = (app.history_viewport_height / 4).max(1);
-            scroll_page(&mut app.scroll_view_state, true, page);
-            return false;
-        } else if key.code == KeyCode::PageDown {
-            let page = (app.history_viewport_height / 4).max(1);
-            scroll_page(&mut app.scroll_view_state, false, page);
-            return false;
-        } else if key.code == KeyCode::Up
-            && !has_shift
-            && app.input_state.is_at_top(app.wrap_width)
-            && !app.messages.is_empty()
-        {
-            enter_history(app);
-            return false;
+            KeyCode::Enter if has_shift || has_ctrl => app.input_state.insert_char('\n'),
+            KeyCode::Tab => app.input_state.insert_str("  "),
+            KeyCode::PageUp => scroll_page(&mut app.scroll_view_state, true, page),
+            KeyCode::PageDown => scroll_page(&mut app.scroll_view_state, false, page),
+            KeyCode::Up if !has_shift && app.input_state.is_at_top(app.wrap_width) && !app.messages.is_empty() => {
+                enter_history(app);
+            }
+            _ => app.input_state.handle_key_event(key, app.wrap_width),
         }
+        return false;
+    }
 
-        app.input_state.handle_key_event(key, app.wrap_width);
-    } else {
-        match key.code {
-            KeyCode::PageUp | KeyCode::Up => {
-                let page = (app.history_viewport_height / 4).max(1);
-                scroll_page(&mut app.scroll_view_state, true, page);
-            }
-            KeyCode::PageDown | KeyCode::Down => {
-                let page = (app.history_viewport_height / 4).max(1);
-                scroll_page(&mut app.scroll_view_state, false, page);
-            }
-            _ => {}
+    // Non-editable input (agent thinking): allow scrolling, ignore text input
+    match key.code {
+        KeyCode::PageUp | KeyCode::PageDown | KeyCode::Up | KeyCode::Down => {
+            let up = matches!(key.code, KeyCode::PageUp | KeyCode::Up);
+            scroll_page(&mut app.scroll_view_state, up, page);
         }
+        _ => {}
     }
 
     false
