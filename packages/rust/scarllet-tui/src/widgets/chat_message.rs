@@ -89,7 +89,7 @@ fn build_lines<'a>(
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )));
-            let md = tui_markdown::from_str(text);
+            let md = super::markdown::render_markdown(text);
             for line in md.lines {
                 lines.push(line);
             }
@@ -128,7 +128,7 @@ fn build_lines<'a>(
                         chars_budget -= take;
                         let border = Span::styled("│ ", Style::default().fg(Color::DarkGray));
                         let content_w = inner_width.saturating_sub(2) as usize;
-                        let md = tui_markdown::from_str(visible);
+                        let md = super::markdown::render_markdown(visible);
                         let dimmed: Vec<Line> = md
                             .lines
                             .into_iter()
@@ -149,7 +149,7 @@ fn build_lines<'a>(
                         let visible_end = byte_offset_for_chars(text, take);
                         let visible = &text[..visible_end];
                         chars_budget -= take;
-                        let md = tui_markdown::from_str(visible);
+                        let md = super::markdown::render_markdown(visible);
                         for line in md.lines {
                             lines.push(line);
                         }

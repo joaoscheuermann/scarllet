@@ -13,7 +13,7 @@ service Orchestrator {
   rpc ReportProgress(ProgressReport) returns (Ack);
   rpc GetAgentStatus(AgentStatusQuery) returns (AgentStatusResponse);
   rpc AttachTui(stream TuiMessage) returns (stream CoreEvent);
-  rpc AgentStream(stream AgentMessage) returns (stream AgentTask);
+  rpc AgentStream(stream AgentMessage) returns (stream AgentInstruction);
   rpc EmitDebugLog(DebugLogRequest) returns (Ack);
 }
 
@@ -101,6 +101,7 @@ message TuiMessage {
   oneof payload {
     PromptMessage prompt = 1;
     CancelPrompt cancel = 2;
+    HistorySync history_sync = 3;
   }
 }
 
@@ -220,4 +221,24 @@ message AgentTask {
   string task_id = 1;
   string prompt = 2;
   string working_directory = 3;
+}
+
+message HistoryEntry {
+  string role = 1;
+  string content = 2;
+}
+
+message HistorySync {
+  repeated HistoryEntry messages = 1;
+}
+
+message AgentHistorySync {
+  repeated HistoryEntry messages = 1;
+}
+
+message AgentInstruction {
+  oneof payload {
+    AgentTask task = 1;
+    AgentHistorySync history_sync = 2;
+  }
 }

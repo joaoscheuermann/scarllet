@@ -1,5 +1,6 @@
 /// Reusable TUI widgets for the chat interface.
 pub mod chat_message;
+pub mod markdown;
 pub mod scroll_view;
 
 pub use chat_message::ChatMessageWidget;

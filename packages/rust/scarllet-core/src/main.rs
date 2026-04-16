@@ -79,6 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         task_manager,
         session_registry,
         agent_registry,
+        conversation_history: Arc::new(RwLock::new(Vec::new())),
         bound_addr: bound_addr_str,
     };
 

@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
 use scarllet_proto::proto::TuiMessage;
-
-/// Characters revealed per tick during the typewriter animation.
+use crate::session;
 pub(crate) const TYPEWRITER_CHARS_PER_TICK: usize = 30;
 
 /// Minimum interval between environment refreshes (cwd, git info).
@@ -119,6 +119,8 @@ pub(crate) struct App {
     pub(crate) git_info: Option<crate::git_info::GitInfo>,
     pub(crate) last_env_refresh: Instant,
     pub(crate) debug_enabled: bool,
+    pub(crate) session_repo: Arc<dyn session::SessionRepository>,
+    pub(crate) session_id: String,
     pub(crate) total_tokens: u32,
     pub(crate) context_window: u32,
 }
@@ -136,11 +138,12 @@ pub(crate) fn total_block_chars(blocks: &[DisplayBlock]) -> usize {
 
 impl App {
     /// Initializes application state with the given Core message channel,
-    /// working directory, and debug flag.
+    /// working directory, debug flag, and session repository.
     pub(crate) fn new(
         message_tx: mpsc::Sender<TuiMessage>,
         cwd: PathBuf,
         debug_enabled: bool,
+        session_repo: Arc<dyn session::SessionRepository>,
     ) -> Self {
         let cwd_display = crate::git_info::abbreviate_home(&cwd);
         let git = crate::git_info::read_git_info(&cwd);
@@ -168,7 +171,119 @@ impl App {
             debug_enabled,
             total_tokens: 0,
             context_window: 0,
+            session_repo,
+            session_id: uuid::Uuid::new_v4().to_string(),
         }
+    }
+
+    /// Persists the current session to disk.
+    /// Silently logs and continues on failure.
+    pub(crate) fn save_session(&self) {
+        let messages: Vec<session::SessionMessage> = self
+            .messages
+            .iter()
+            .filter_map(|e| match e {
+                ChatEntry::User { text } => Some(session::SessionMessage {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    role: session::MessageRole::User,
+                    content: text.clone(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    agent_name: None,
+                    task_id: None,
+                    blocks: None,
+                }),
+                ChatEntry::Agent {
+                    name,
+                    task_id,
+                    blocks,
+                    done,
+                    ..
+                } if *done => {
+                    let session_blocks: Vec<session::SessionBlock> = blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            DisplayBlock::Text(t) => Some(session::SessionBlock {
+                                block_type: "text".into(),
+                                content: t.clone(),
+                            }),
+                            DisplayBlock::Thought(t) => Some(session::SessionBlock {
+                                block_type: "thought".into(),
+                                content: t.clone(),
+                            }),
+                            DisplayBlock::ToolCallRef(_) => None,
+                        })
+                        .collect();
+                    let content = session_blocks
+                        .iter()
+                        .map(|b| b.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Some(session::SessionMessage {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        role: session::MessageRole::Assistant,
+                        content,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        agent_name: Some(name.clone()),
+                        task_id: Some(task_id.clone()),
+                        blocks: Some(session_blocks),
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+
+        let session = session::Session {
+            id: self.session_id.clone(),
+            created_at: String::new(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            messages,
+        };
+
+        if let Err(e) = self.session_repo.save(&session) {
+            tracing::warn!("Failed to save session: {e}");
+        }
+    }
+
+    /// Creates a new empty session, clearing the chat history.
+    pub(crate) fn new_session(&mut self) {
+        self.session_id = uuid::Uuid::new_v4().to_string();
+        self.messages.clear();
+        self.scroll_view_state = crate::widgets::ScrollViewState::new();
+        self.focused_message_idx = None;
+    }
+
+    /// Loads chat messages from a restored session into App state.
+    pub(crate) fn load_from_session(&mut self, session: session::Session) {
+        self.session_id = session.id;
+        self.messages = session
+            .messages
+            .into_iter()
+            .map(|m| match m.role {
+                session::MessageRole::User => ChatEntry::User {
+                    text: m.content,
+                },
+                session::MessageRole::Assistant => {
+                    let blocks: Vec<DisplayBlock> = match m.blocks {
+                        Some(saved) => saved
+                            .into_iter()
+                            .map(|b| match b.block_type.as_str() {
+                                "thought" => DisplayBlock::Thought(b.content),
+                                _ => DisplayBlock::Text(b.content),
+                            })
+                            .collect(),
+                        None => vec![DisplayBlock::Text(m.content)],
+                    };
+                    let char_count = crate::app::total_block_chars(&blocks);
+                    ChatEntry::Agent {
+                        name: m.agent_name.unwrap_or_default(),
+                        task_id: m.task_id.unwrap_or_default(),
+                        blocks,
+                        visible_chars: char_count,
+                        done: true,
+                    }
+                }
+            })
+            .collect();
     }
 
     /// Re-reads the working directory and git info if enough time has elapsed.

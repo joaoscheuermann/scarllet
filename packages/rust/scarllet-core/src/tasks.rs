@@ -100,6 +100,15 @@ impl TaskManager {
         }
     }
 
+    /// Returns IDs of all pending or running tasks regardless of agent.
+    pub fn all_active_task_ids(&self) -> Vec<String> {
+        self.tasks
+            .iter()
+            .filter(|(_, t)| matches!(t.status, TaskStatus::Pending | TaskStatus::Running))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// Returns IDs of all pending or running tasks assigned to the named agent.
     pub fn active_tasks_for_agent(&self, agent_name: &str) -> Vec<String> {
         self.tasks
@@ -267,5 +276,22 @@ mod tests {
 
         tm.set_status(&id, TaskStatus::Completed);
         assert_eq!(tm.get(&id).unwrap().status, TaskStatus::Completed);
+    }
+
+    #[test]
+    fn all_active_task_ids_returns_pending_and_running() {
+        let mut tm = TaskManager::new();
+        let pending = tm.submit("a".into(), "/tmp".into(), 1);
+        let running = tm.submit("b".into(), "/tmp".into(), 1);
+        let done = tm.submit("c".into(), "/tmp".into(), 1);
+
+        tm.set_status(&running, TaskStatus::Running);
+        tm.set_status(&done, TaskStatus::Completed);
+
+        let mut active = tm.all_active_task_ids();
+        active.sort();
+        let mut expected = vec![pending, running];
+        expected.sort();
+        assert_eq!(active, expected);
     }
 }

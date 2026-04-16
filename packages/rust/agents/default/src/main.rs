@@ -3,6 +3,7 @@ use scarllet_llm::types::{
     ToolCallDelta, ToolDefinition,
 };
 use scarllet_llm::LlmClient;
+use scarllet_proto::proto::agent_instruction;
 use scarllet_proto::proto::agent_message;
 use scarllet_proto::proto::orchestrator_client::OrchestratorClient;
 use scarllet_proto::proto::*;
@@ -216,7 +217,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut history: Vec<ChatMessage> = Vec::new();
 
-    while let Some(task) = task_stream.message().await? {
+    while let Some(instruction) = task_stream.message().await? {
+        if let Some(agent_instruction::Payload::HistorySync(sync)) = &instruction.payload {
+            history = sync
+                .messages
+                .iter()
+                .map(|e| ChatMessage {
+                    role: if e.role == "user" {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
+                    content: e.content.clone(),
+                    tool_calls: None,
+                    tool_call_id: None,
+                })
+                .collect();
+            info!("Received {} history entries", sync.messages.len());
+            continue;
+        }
+
+        let Some(agent_instruction::Payload::Task(task)) = instruction.payload else {
+            continue;
+        };
+
         info!(
             "Received task {}: {}",
             task.task_id,

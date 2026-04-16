@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use scarllet_proto::proto::agent_instruction;
 use scarllet_proto::proto::core_event;
 use scarllet_proto::proto::*;
 use scarllet_sdk::config::{self, ScarlletConfig};
@@ -108,7 +109,10 @@ pub(crate) async fn route_prompt(
             prompt: text.to_string(),
             working_directory: working_dir.to_string(),
         };
-        let _ = sender.try_send(Ok(task));
+        let instruction = AgentInstruction {
+            payload: Some(agent_instruction::Payload::Task(task)),
+        };
+        let _ = sender.try_send(Ok(instruction));
         return;
     }
     drop(ar);
@@ -148,7 +152,10 @@ pub(crate) async fn route_prompt(
                             prompt: prompt_text.clone(),
                             working_directory: wd.clone(),
                         };
-                        let _ = sender.try_send(Ok(task));
+                        let instruction = AgentInstruction {
+                            payload: Some(agent_instruction::Payload::Task(task)),
+                        };
+                        let _ = sender.try_send(Ok(instruction));
                         return;
                     }
                 }

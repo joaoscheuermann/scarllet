@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use scarllet_proto::proto::agent_instruction;
 use scarllet_proto::proto::agent_message;
 use scarllet_proto::proto::core_event;
 use scarllet_proto::proto::orchestrator_server::Orchestrator;
@@ -31,6 +32,7 @@ pub(crate) struct OrchestratorService {
     pub(crate) task_manager: Arc<RwLock<TaskManager>>,
     pub(crate) session_registry: Arc<RwLock<TuiSessionRegistry>>,
     pub(crate) agent_registry: Arc<RwLock<AgentRegistry>>,
+    pub(crate) conversation_history: Arc<RwLock<Vec<HistoryEntry>>>,
     pub(crate) bound_addr: String,
 }
 
@@ -294,12 +296,18 @@ impl Orchestrator for OrchestratorService {
         let registry = Arc::clone(&self.registry);
         let config = Arc::clone(&self.config);
         let task_manager = Arc::clone(&self.task_manager);
+        let conversation_history = Arc::clone(&self.conversation_history);
         let core_addr = self.bound_addr.clone();
 
         tokio::spawn(async move {
             while let Ok(Some(msg)) = incoming.message().await {
                 match msg.payload {
                     Some(tui_message::Payload::Prompt(prompt)) => {
+                        conversation_history.write().await.push(HistoryEntry {
+                            role: "user".into(),
+                            content: prompt.text.clone(),
+                        });
+
                         crate::routing::route_prompt(
                             &prompt.text,
                             &prompt.working_directory,
@@ -311,6 +319,14 @@ impl Orchestrator for OrchestratorService {
                             &core_addr,
                         )
                         .await;
+                    }
+                    Some(tui_message::Payload::HistorySync(sync)) => {
+                        let mut history = conversation_history.write().await;
+                        *history = sync.messages;
+                        info!(
+                            "TUI session {session_id} sent history sync ({} entries)",
+                            history.len()
+                        );
                     }
                     Some(tui_message::Payload::Cancel(cancel)) => {
                         let agent_name = {
@@ -339,12 +355,24 @@ impl Orchestrator for OrchestratorService {
             }
             session_registry.write().await.deregister(&session_id);
             info!("TUI session {session_id} disconnected");
+
+            if session_registry.read().await.is_empty() {
+                info!("No TUI sessions remain, cleaning up agents");
+                let active = task_manager.read().await.all_active_task_ids();
+                for tid in &active {
+                    tasks::cancel_task(&task_manager, tid).await;
+                }
+                let agents = agent_registry.write().await.deregister_all();
+                for name in &agents {
+                    info!("Agent '{name}' disconnected (no TUI sessions)");
+                }
+            }
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
-    type AgentStreamStream = ReceiverStream<Result<AgentTask, Status>>;
+    type AgentStreamStream = ReceiverStream<Result<AgentInstruction, Status>>;
 
     /// Opens a bidirectional stream for a long-lived agent process.
     ///
@@ -355,12 +383,14 @@ impl Orchestrator for OrchestratorService {
         &self,
         request: Request<tonic::Streaming<AgentMessage>>,
     ) -> Result<Response<Self::AgentStreamStream>, Status> {
-        let (task_tx, task_rx) = tokio::sync::mpsc::channel::<Result<AgentTask, Status>>(64);
+        let (task_tx, task_rx) =
+            tokio::sync::mpsc::channel::<Result<AgentInstruction, Status>>(64);
 
         let mut incoming = request.into_inner();
         let agent_registry = Arc::clone(&self.agent_registry);
         let session_registry = Arc::clone(&self.session_registry);
         let task_manager = Arc::clone(&self.task_manager);
+        let conversation_history = Arc::clone(&self.conversation_history);
 
         tokio::spawn(async move {
             let mut agent_name: Option<String> = None;
@@ -378,6 +408,16 @@ impl Orchestrator for OrchestratorService {
                             .register(name.clone(), task_tx.clone());
                         agent_name = Some(name.clone());
                         info!("Agent '{name}' registered via AgentStream");
+
+                        let history = conversation_history.read().await.clone();
+                        if !history.is_empty() {
+                            let sync = AgentInstruction {
+                                payload: Some(agent_instruction::Payload::HistorySync(
+                                    AgentHistorySync { messages: history },
+                                )),
+                            };
+                            let _ = task_tx.try_send(Ok(sync));
+                        }
                     }
                     agent_message::Payload::Progress(p) => {
                         let tm = task_manager.read().await;
@@ -408,6 +448,20 @@ impl Orchestrator for OrchestratorService {
                         let mut tm = task_manager.write().await;
                         tm.set_status(&r.task_id, tasks::TaskStatus::Completed);
                         drop(tm);
+
+                        let assistant_text: String = r
+                            .blocks
+                            .iter()
+                            .filter(|b| b.block_type == "text")
+                            .map(|b| b.content.as_str())
+                            .collect::<Vec<_>>()
+                            .join("");
+                        if !assistant_text.is_empty() {
+                            conversation_history.write().await.push(HistoryEntry {
+                                role: "assistant".into(),
+                                content: assistant_text,
+                            });
+                        }
 
                         let event = CoreEvent {
                             payload: Some(core_event::Payload::AgentResponse(

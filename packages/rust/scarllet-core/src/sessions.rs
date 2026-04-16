@@ -27,6 +27,11 @@ impl TuiSessionRegistry {
         self.sessions.remove(id);
     }
 
+    /// Returns `true` when no TUI sessions are connected.
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
+    }
+
     /// Sends an event to all connected TUI sessions. Silently drops on full/closed channels.
     pub fn broadcast(&self, event: CoreEvent) {
         for sender in self.sessions.values() {
@@ -73,5 +78,25 @@ mod tests {
 
         registry.broadcast(make_event());
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn is_empty_reflects_session_count() {
+        let mut registry = TuiSessionRegistry::new();
+        assert!(registry.is_empty());
+
+        let (tx1, _rx1) = mpsc::channel(16);
+        registry.register("s1".into(), tx1);
+        assert!(!registry.is_empty());
+
+        let (tx2, _rx2) = mpsc::channel(16);
+        registry.register("s2".into(), tx2);
+        assert!(!registry.is_empty());
+
+        registry.deregister("s1");
+        assert!(!registry.is_empty());
+
+        registry.deregister("s2");
+        assert!(registry.is_empty());
     }
 }

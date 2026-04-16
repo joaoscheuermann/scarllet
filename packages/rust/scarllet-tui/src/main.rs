@@ -4,6 +4,7 @@ mod events;
 mod git_info;
 mod input;
 mod render;
+mod session;
 mod widgets;
 
 use std::time::Duration;
@@ -49,7 +50,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let debug_enabled = std::env::var("SCARLLET_DEBUG")
         .map(|v| v == "true")
         .unwrap_or(false);
-    let mut app = App::new(message_tx, cwd, debug_enabled);
+    let session_repo: std::sync::Arc<dyn session::SessionRepository> =
+        match session::FileSessionRepository::new() {
+            Ok(repo) => std::sync::Arc::new(repo),
+            Err(_) => std::sync::Arc::new(session::NullSessionRepository),
+        };
+    let mut app = App::new(message_tx, cwd, debug_enabled, session_repo);
+
+    if let Ok(Some(s)) = app.session_repo.load() {
+        app.load_from_session(s);
+    }
 
     loop {
         loop {
@@ -114,6 +124,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if key.kind != crossterm::event::KeyEventKind::Press {
                                 continue;
                             }
+                            if key.code == KeyCode::Char('n')
+                                && key.modifiers.contains(KeyModifiers::CONTROL)
+                            {
+                                app.save_session();
+                                app.new_session();
+                                continue;
+                            }
                             if events::handle_input(&mut app, key) {
                                 should_exit = true;
                                 break;
@@ -128,6 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if should_exit {
+                app.save_session();
                 break;
             }
         }

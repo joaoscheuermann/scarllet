@@ -141,6 +141,7 @@ pub(crate) fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bo
                     text: trimmed.clone(),
                 });
                 app.input_state.set_text(String::new());
+                app.save_session();
 
                 let msg = TuiMessage {
                     payload: Some(tui_message::Payload::Prompt(PromptMessage {
@@ -222,6 +223,44 @@ pub(crate) fn handle_core_event(app: &mut App, event: CoreEvent) {
     match payload {
         core_event::Payload::Connected(_) => {
             app.route = Route::Chat;
+
+            let entries: Vec<HistoryEntry> = app
+                .messages
+                .iter()
+                .filter_map(|e| match e {
+                    ChatEntry::User { text } => Some(HistoryEntry {
+                        role: "user".into(),
+                        content: text.clone(),
+                    }),
+                    ChatEntry::Agent { blocks, done, .. } if *done => {
+                        let content = blocks
+                            .iter()
+                            .filter_map(|b| match b {
+                                DisplayBlock::Text(t) => Some(t.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if content.is_empty() {
+                            return None;
+                        }
+                        Some(HistoryEntry {
+                            role: "assistant".into(),
+                            content,
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            if !entries.is_empty() {
+                let msg = TuiMessage {
+                    payload: Some(tui_message::Payload::HistorySync(HistorySync {
+                        messages: entries,
+                    })),
+                };
+                let _ = app.message_tx.try_send(msg);
+            }
         }
         core_event::Payload::AgentStarted(e) => {
             app.input_locked = true;
@@ -254,6 +293,7 @@ pub(crate) fn handle_core_event(app: &mut App, event: CoreEvent) {
                     *done = true;
                 }
             }
+            app.save_session();
             app.input_locked = false;
             app.focus = Focus::Input;
             app.focused_message_idx = None;
