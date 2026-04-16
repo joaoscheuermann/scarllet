@@ -38,7 +38,7 @@ fn print_manifest() {
 
 /// Assembles the system prompt with OS info and available tool descriptions.
 fn build_system_prompt(tools: &[ToolInfo]) -> String {
-    let mut prompt = format!("Operating system: {}\n\n", std::env::consts::OS);
+    let mut prompt = format!("Current operating system: {}\n\nYour goal is to help the user achieve their goals as close as possible.\n\n When starting a session you should always understand the codebase structure with the tools available.\n\n Use all available skills in the `.agents` to help you achive the user goals", std::env::consts::OS);
 
     if !tools.is_empty() {
         prompt.push_str("You have access to the following tools:\n");
@@ -48,7 +48,6 @@ fn build_system_prompt(tools: &[ToolInfo]) -> String {
         prompt.push('\n');
     }
 
-    prompt.push_str("Achieve the goal of this session.");
     prompt
 }
 
@@ -255,7 +254,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let llm = match provider_resp.provider_type.as_str() {
             "gemini" => LlmClient::new_gemini(provider_resp.api_key.clone()),
-            _ => LlmClient::new_openai(provider_resp.api_url.clone(), provider_resp.api_key.clone()),
+            _ => {
+                LlmClient::new_openai(provider_resp.api_url.clone(), provider_resp.api_key.clone())
+            }
         };
 
         debug_log(
@@ -273,7 +274,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         debug_log(
             &mut client,
             "debug",
-            &format!("Context window for {}: {context_window}", provider_resp.model),
+            &format!(
+                "Context window for {}: {context_window}",
+                provider_resp.model
+            ),
         )
         .await;
 
@@ -359,12 +363,7 @@ async fn run_tool_loop(
         let mut stream = match ctx.llm.chat_stream(request).await {
             Ok(s) => s,
             Err(e) => {
-                debug_log(
-                    ctx.client,
-                    "error",
-                    &format!("LLM chat_stream failed: {e}"),
-                )
-                .await;
+                debug_log(ctx.client, "error", &format!("LLM chat_stream failed: {e}")).await;
                 return Err(e.into());
             }
         };
@@ -403,12 +402,7 @@ async fn run_tool_loop(
                     let _ = ctx.msg_tx.send(progress).await;
                 }
                 Err(e) => {
-                    debug_log(
-                        ctx.client,
-                        "error",
-                        &format!("Stream chunk error: {e}"),
-                    )
-                    .await;
+                    debug_log(ctx.client, "error", &format!("Stream chunk error: {e}")).await;
                     return Err(e.into());
                 }
             }
@@ -461,7 +455,10 @@ async fn run_tool_loop(
             &format!(
                 "Executing {} tool call(s): {:?}",
                 tool_calls.len(),
-                tool_calls.iter().map(|tc| &tc.function.name).collect::<Vec<_>>()
+                tool_calls
+                    .iter()
+                    .map(|tc| &tc.function.name)
+                    .collect::<Vec<_>>()
             ),
         )
         .await;
@@ -508,8 +505,7 @@ async fn run_tool_loop(
                 serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
 
             if let serde_json::Value::Object(ref mut map) = args {
-                if !map.contains_key("working_directory")
-                    && !ctx.task.working_directory.is_empty()
+                if !map.contains_key("working_directory") && !ctx.task.working_directory.is_empty()
                 {
                     map.insert(
                         "working_directory".to_string(),

@@ -23,6 +23,7 @@ Copy-Item (Join-Path $cargoRelease "find-tool.exe") (Join-Path $toolsDir "find.e
 Copy-Item (Join-Path $cargoRelease "grep-tool.exe") (Join-Path $toolsDir "grep.exe")
 Copy-Item (Join-Path $cargoRelease "edit-tool.exe") (Join-Path $toolsDir "edit.exe")
 Copy-Item (Join-Path $cargoRelease "write-tool.exe") (Join-Path $toolsDir "write.exe")
+Copy-Item (Join-Path $cargoRelease "tree-tool.exe") (Join-Path $toolsDir "tree.exe")
 
 Write-Host "Release folder created at: $releaseDir"
 Get-ChildItem -Recurse $releaseDir | ForEach-Object {

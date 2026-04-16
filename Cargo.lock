@@ -3898,6 +3898,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-tool"
+version = "0.1.0"
+dependencies = [
+ "glob",
+ "ignore",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -12,6 +12,7 @@ members = [
   "packages/rust/tools/grep",
   "packages/rust/tools/edit",
   "packages/rust/tools/write",
+  "packages/rust/tools/tree",
 ]
 
 [profile.release]
