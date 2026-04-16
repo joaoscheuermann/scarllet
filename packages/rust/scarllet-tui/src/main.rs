@@ -8,7 +8,7 @@ mod widgets;
 
 use std::time::Duration;
 
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use tokio::sync::mpsc;
 
 use scarllet_proto::proto::*;
@@ -29,9 +29,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     let mut terminal = ratatui::init();
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste).ok();
     crossterm::execute!(
         std::io::stdout(),
-        crossterm::event::EnableBracketedPaste,
         crossterm::event::PushKeyboardEnhancementFlags(
             crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
         )
@@ -72,31 +72,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let poll_ms = if app.is_streaming() { 50 } else { 200 };
         if event::poll(Duration::from_millis(poll_ms))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    if key.kind != crossterm::event::KeyEventKind::Press {
-                        continue;
-                    }
-                    if events::handle_input(&mut app, key) {
-                        break;
+            let first = event::read()?;
+            let mut batch = vec![first];
+            while event::poll(Duration::from_millis(1))? {
+                batch.push(event::read()?);
+            }
+
+            let all_keys = batch.iter().all(|e| matches!(e, Event::Key(_)));
+            let is_paste_batch = batch.len() > 1 && all_keys && app.is_input_editable();
+
+            let mut should_exit = false;
+
+            if is_paste_batch {
+                let mut paste_buf = String::new();
+                for ev in &batch {
+                    if let Event::Key(key) = ev {
+                        if key.kind != crossterm::event::KeyEventKind::Press {
+                            continue;
+                        }
+                        if key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            should_exit = true;
+                            break;
+                        }
+                        match key.code {
+                            KeyCode::Enter => paste_buf.push('\n'),
+                            KeyCode::Char(c) => paste_buf.push(c),
+                            KeyCode::Tab => paste_buf.push('\t'),
+                            _ => {}
+                        }
                     }
                 }
-                Event::Paste(text) => {
-                    events::handle_paste(&mut app, &text);
+                if !should_exit && !paste_buf.is_empty() {
+                    events::handle_paste(&mut app, &paste_buf);
                 }
-                _ => {}
+            } else {
+                for ev in batch {
+                    match ev {
+                        Event::Key(key) => {
+                            if key.kind != crossterm::event::KeyEventKind::Press {
+                                continue;
+                            }
+                            if events::handle_input(&mut app, key) {
+                                should_exit = true;
+                                break;
+                            }
+                        }
+                        Event::Paste(text) => {
+                            events::handle_paste(&mut app, &text);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if should_exit {
+                break;
             }
         }
 
         app.advance_tick();
     }
 
-    crossterm::execute!(
-        std::io::stdout(),
-        crossterm::event::DisableBracketedPaste,
-        crossterm::event::PopKeyboardEnhancementFlags
-    )
-    .ok();
+    crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste).ok();
+    crossterm::execute!(std::io::stdout(), crossterm::event::PopKeyboardEnhancementFlags).ok();
     ratatui::restore();
     Ok(())
 }

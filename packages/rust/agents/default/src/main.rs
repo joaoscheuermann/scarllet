@@ -38,7 +38,7 @@ fn print_manifest() {
 
 /// Assembles the system prompt with OS info and available tool descriptions.
 fn build_system_prompt(tools: &[ToolInfo]) -> String {
-    let mut prompt = format!("Current operating system: {}\n\nYour goal is to help the user achieve their goals as close as possible.\n\n When starting a session you should always understand the codebase structure with the tools available.\n\n Use all available skills in the `.agents` to help you achive the user goals", std::env::consts::OS);
+    let mut prompt = format!("Current operating system: {}\n\n", std::env::consts::OS);
 
     if !tools.is_empty() {
         prompt.push_str("You have access to the following tools:\n");
@@ -47,6 +47,12 @@ fn build_system_prompt(tools: &[ToolInfo]) -> String {
         }
         prompt.push('\n');
     }
+
+    prompt.push_str(
+"Your goal is to help the user achieve their goals as close as possible. \
+        Use all available skills in the `.agents` to help you achive the user goals \
+        BEFORE any action you should ALWAYS understand the codebase structure with the tools available.",
+    );
 
     prompt
 }

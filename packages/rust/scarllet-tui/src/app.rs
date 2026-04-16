@@ -209,6 +209,11 @@ impl App {
         }
     }
 
+    /// Returns true when the input field accepts edits (correct route, focused, unlocked).
+    pub(crate) fn is_input_editable(&self) -> bool {
+        self.focus == Focus::Input && !self.input_locked && matches!(self.route, Route::Chat)
+    }
+
     /// Returns true when any agent response is still streaming or a tool call is running.
     pub(crate) fn is_streaming(&self) -> bool {
         self.messages
