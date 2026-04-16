@@ -49,31 +49,49 @@ fn print_manifest() {
 fn execute(input: WriteInput) -> WriteOutput {
     let file_path = PathBuf::from(&input.path);
 
-    if let Some(parent) = file_path.parent() {
-        if !parent.exists() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                return WriteOutput {
-                    success: false,
-                    bytes_written: 0,
-                    error: Some(format!("Failed to create parent directories: {e}")),
-                };
-            }
+    if input.path.is_empty() {
+        return WriteOutput {
+            success: false,
+            bytes_written: 0,
+            error: Some("Path must not be empty".into()),
+        };
+    }
+
+    let parent = match file_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => {
+            return WriteOutput {
+                success: false,
+                bytes_written: 0,
+                error: Some("Invalid path: no parent directory".into()),
+            };
+        }
+    };
+
+    if !parent.exists() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            return WriteOutput {
+                success: false,
+                bytes_written: 0,
+                error: Some(format!("Failed to create parent directories: {e}")),
+            };
         }
     }
 
     let bytes = input.content.len();
 
-    match fs::write(&file_path, &input.content) {
-        Ok(()) => WriteOutput {
-            success: true,
-            bytes_written: bytes,
-            error: None,
-        },
-        Err(e) => WriteOutput {
+    if let Err(e) = fs::write(&file_path, &input.content) {
+        return WriteOutput {
             success: false,
             bytes_written: 0,
             error: Some(format!("Failed to write file: {e}")),
-        },
+        };
+    }
+
+    WriteOutput {
+        success: true,
+        bytes_written: bytes,
+        error: None,
     }
 }
 

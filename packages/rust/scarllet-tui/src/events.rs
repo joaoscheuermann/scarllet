@@ -11,11 +11,7 @@ use crate::app::{
 };
 
 /// Scrolls the view by one page in the given direction.
-pub(crate) fn scroll_page(
-    state: &mut crate::widgets::ScrollViewState,
-    up: bool,
-    page_height: u16,
-) {
+pub(crate) fn scroll_page(state: &mut crate::widgets::ScrollViewState, up: bool, page_height: u16) {
     if up {
         state.offset_y = state.offset_y.saturating_sub(page_height);
     } else {
@@ -107,11 +103,11 @@ pub(crate) fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bo
                 app.input_state.insert_char(c);
             }
             KeyCode::PageUp => {
-                let page = app.history_viewport_height.max(1);
+                let page = (app.history_viewport_height * (0.25 as u16)).max(1);
                 scroll_page(&mut app.scroll_view_state, true, page);
             }
             KeyCode::PageDown => {
-                let page = app.history_viewport_height.max(1);
+                let page = (app.history_viewport_height * (0.25 as u16)).max(1);
                 scroll_page(&mut app.scroll_view_state, false, page);
             }
             _ => {}
@@ -168,11 +164,11 @@ pub(crate) fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bo
             app.input_state.insert_str("  ");
             return false;
         } else if key.code == KeyCode::PageUp {
-            let page = app.history_viewport_height.max(1);
+            let page = (app.history_viewport_height / 4).max(1);
             scroll_page(&mut app.scroll_view_state, true, page);
             return false;
         } else if key.code == KeyCode::PageDown {
-            let page = app.history_viewport_height.max(1);
+            let page = (app.history_viewport_height / 4).max(1);
             scroll_page(&mut app.scroll_view_state, false, page);
             return false;
         } else if key.code == KeyCode::Up
@@ -188,11 +184,11 @@ pub(crate) fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bo
     } else {
         match key.code {
             KeyCode::PageUp | KeyCode::Up => {
-                let page = app.history_viewport_height.max(1);
+                let page = (app.history_viewport_height / 4).max(1);
                 scroll_page(&mut app.scroll_view_state, true, page);
             }
             KeyCode::PageDown | KeyCode::Down => {
-                let page = app.history_viewport_height.max(1);
+                let page = (app.history_viewport_height / 4).max(1);
                 scroll_page(&mut app.scroll_view_state, false, page);
             }
             _ => {}

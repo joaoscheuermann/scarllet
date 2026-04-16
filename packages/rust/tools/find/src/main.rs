@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 const DEFAULT_LIMIT: usize = 1000;
 /// Maximum total output size in bytes before truncation.
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
+/// Directories and entries to filter out from file walking.
+const FILTERED_ENTRIES: &[&str] = &["node_modules", ".git"];
 
 /// JSON input payload for the find tool.
 #[derive(Deserialize)]
@@ -59,12 +61,10 @@ fn print_manifest() {
 }
 
 /// Tests whether a path matches the given glob pattern.
-fn matches_glob(path: &str, pattern: &str) -> bool {
-    let glob_pattern = glob::Pattern::new(pattern);
-    match glob_pattern {
-        Ok(p) => p.matches(path),
-        Err(_) => false,
-    }
+fn matches_glob(path: &str, pattern: &str) -> Result<bool, String> {
+    let glob_pattern = glob::Pattern::new(pattern)
+        .map_err(|e| format!("Invalid glob pattern '{}': {}", pattern, e))?;
+    Ok(glob_pattern.matches(path))
 }
 
 /// Converts a path to forward-slash format for cross-platform consistency.
@@ -90,6 +90,7 @@ fn execute(input: FindInput) -> FindOutput {
     let mut results: Vec<String> = Vec::new();
     let mut total_bytes: usize = 0;
     let mut truncated = false;
+    let mut total_matched: usize = 0;
 
     let walker = WalkBuilder::new(&search_path)
         .hidden(false)
@@ -98,7 +99,7 @@ fn execute(input: FindInput) -> FindOutput {
         .git_exclude(true)
         .filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
-            name != "node_modules" && name != ".git"
+            !FILTERED_ENTRIES.contains(&name.as_ref())
         })
         .build();
 
@@ -124,12 +125,23 @@ fn execute(input: FindInput) -> FindOutput {
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let is_match = matches_glob(&relative_str, &input.pattern)
-            || matches_glob(&file_name, &input.pattern);
+        let is_match = match matches_glob(&relative_str, &input.pattern) {
+            Ok(m) => m || matches_glob(&file_name, &input.pattern).unwrap_or(false),
+            Err(e) => {
+                return FindOutput {
+                    results: vec![],
+                    total: 0,
+                    truncated: false,
+                    error: Some(e),
+                };
+            }
+        };
 
         if !is_match {
             continue;
         }
+
+        total_matched += 1;
 
         let line_bytes = relative_str.len() + 1;
         if total_bytes + line_bytes > MAX_OUTPUT_BYTES {
@@ -137,16 +149,16 @@ fn execute(input: FindInput) -> FindOutput {
             break;
         }
 
-        total_bytes += line_bytes;
-        results.push(relative_str);
-
         if results.len() >= effective_limit {
             truncated = true;
             break;
         }
+
+        total_bytes += line_bytes;
+        results.push(relative_str);
     }
 
-    let total = results.len();
+    let total = if truncated { total_matched } else { results.len() };
     FindOutput {
         results,
         total,

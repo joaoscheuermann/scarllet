@@ -112,30 +112,6 @@ fn normalize_for_fuzzy(text: &str) -> String {
         .join("\n")
 }
 
-/// Finds `old_text` in `content`, falling back to whitespace-normalized matching.
-///
-/// Returns `(index, length, was_fuzzy)` or `None`.
-fn fuzzy_find(content: &str, old_text: &str) -> Option<(usize, usize, bool)> {
-    if let Some(idx) = content.find(old_text) {
-        return Some((idx, old_text.len(), false));
-    }
-
-    let fuzzy_content = normalize_for_fuzzy(content);
-    let fuzzy_old = normalize_for_fuzzy(old_text);
-    if let Some(idx) = fuzzy_content.find(&fuzzy_old) {
-        return Some((idx, fuzzy_old.len(), true));
-    }
-
-    None
-}
-
-/// Counts how many times `old_text` appears in `content` (fuzzy-normalized).
-fn count_occurrences(content: &str, old_text: &str) -> usize {
-    let fuzzy_content = normalize_for_fuzzy(content);
-    let fuzzy_old = normalize_for_fuzzy(old_text);
-    fuzzy_content.matches(&fuzzy_old).count()
-}
-
 /// Produces a line-by-line unified diff with line numbers.
 fn generate_diff(old: &str, new: &str) -> (String, Option<usize>) {
     let diff = TextDiff::from_lines(old, new);
@@ -223,10 +199,15 @@ fn execute(input: EditInput) -> EditOutput {
     let original_ending = detect_line_ending(content);
     let normalized = normalize_to_lf(content);
 
+    // Normalize edits: convert line endings and strip trailing whitespace for fuzzy matching
     let edits_normalized: Vec<(String, String)> = input
         .edits
         .iter()
-        .map(|e| (normalize_to_lf(&e.old_text), normalize_to_lf(&e.new_text)))
+        .map(|e| {
+            let old_lf = normalize_to_lf(&e.old_text);
+            let new_lf = normalize_to_lf(&e.new_text);
+            (normalize_for_fuzzy(&old_lf), normalize_for_fuzzy(&new_lf))
+        })
         .collect();
 
     for (i, (old_text, _)) in edits_normalized.iter().enumerate() {
@@ -245,10 +226,12 @@ fn execute(input: EditInput) -> EditOutput {
         }
     }
 
+    // Check if any edit requires fuzzy matching (exact match fails due to whitespace differences)
     let any_fuzzy = edits_normalized
         .iter()
         .any(|(old_text, _)| normalized.find(old_text.as_str()).is_none());
 
+    // For fuzzy matching, we need consistent index mapping between content and patterns
     let base_content = if any_fuzzy {
         normalize_for_fuzzy(&normalized)
     } else {
@@ -258,13 +241,20 @@ fn execute(input: EditInput) -> EditOutput {
     let mut matched_edits: Vec<MatchedEdit> = Vec::new();
 
     for (i, (old_text, new_text)) in edits_normalized.iter().enumerate() {
-        let find_result = fuzzy_find(&base_content, old_text);
-        match find_result {
+        // Find the edit in the base content (already fuzzy-normalized if needed)
+        let idx = match base_content.find(old_text.as_str()) {
+            Some(idx) => idx,
             None => {
                 let msg = if edits_normalized.len() == 1 {
-                    format!("Could not find the exact text in {}. The old text must match exactly including all whitespace and newlines.", input.path)
+                    format!(
+                        "Could not find the exact text in {}. The old text must match exactly including all whitespace and newlines.",
+                        input.path
+                    )
                 } else {
-                    format!("Could not find edits[{}] in {}. The oldText must match exactly including all whitespace and newlines.", i, input.path)
+                    format!(
+                        "Could not find edits[{}] in {}. The oldText must match exactly including all whitespace and newlines.",
+                        i, input.path
+                    )
                 };
                 return EditOutput {
                     success: false,
@@ -273,30 +263,36 @@ fn execute(input: EditInput) -> EditOutput {
                     error: Some(msg),
                 };
             }
-            Some((idx, len, _)) => {
-                let occurrences = count_occurrences(&base_content, old_text);
-                if occurrences > 1 {
-                    let msg = if edits_normalized.len() == 1 {
-                        format!("Found {} occurrences of the text in {}. The text must be unique. Please provide more context.", occurrences, input.path)
-                    } else {
-                        format!("Found {} occurrences of edits[{}] in {}. Each oldText must be unique.", occurrences, i, input.path)
-                    };
-                    return EditOutput {
-                        success: false,
-                        diff: String::new(),
-                        first_changed_line: None,
-                        error: Some(msg),
-                    };
-                }
+        };
 
-                matched_edits.push(MatchedEdit {
-                    edit_index: i,
-                    match_index: idx,
-                    match_length: len,
-                    new_text: new_text.clone(),
-                });
-            }
+        // Check for duplicate occurrences
+        let occurrences = base_content.matches(old_text.as_str()).count();
+        if occurrences > 1 {
+            let msg = if edits_normalized.len() == 1 {
+                format!(
+                    "Found {} occurrences of the text in {}. The text must be unique. Please provide more context.",
+                    occurrences, input.path
+                )
+            } else {
+                format!(
+                    "Found {} occurrences of edits[{}] in {}. Each oldText must be unique.",
+                    occurrences, i, input.path
+                )
+            };
+            return EditOutput {
+                success: false,
+                diff: String::new(),
+                first_changed_line: None,
+                error: Some(msg),
+            };
         }
+
+        matched_edits.push(MatchedEdit {
+            edit_index: i,
+            match_index: idx,
+            match_length: old_text.len(),
+            new_text: new_text.clone(),
+        });
     }
 
     matched_edits.sort_by_key(|e| e.match_index);
