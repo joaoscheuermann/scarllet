@@ -7,25 +7,51 @@ use gemini_rust::tools::model::FunctionDeclaration;
 use gemini_rust::Part;
 use tokio_stream::StreamExt;
 
+/// Ensures the model string has the `models/` prefix required by the Gemini API.
+fn normalize_model_path(model: &str) -> String {
+    if model.starts_with("models/") {
+        return model.to_string();
+    }
+    format!("models/{model}")
+}
+
+/// [`LlmProvider`] backed by the Google Gemini / Generative Language API.
+///
+/// Uses the `gemini_rust` SDK for request building and streaming, and falls
+/// back to raw HTTP for metadata queries (e.g. context window lookup).
 pub struct GeminiProvider {
     api_key: String,
+    http: reqwest::Client,
+    api_base_url: String,
 }
 
 impl GeminiProvider {
+    /// Initialises the provider with an API key pointing at the default
+    /// Gemini v1beta endpoint.
     pub fn new(api_key: String) -> Self {
-        Self { api_key }
+        Self {
+            api_key,
+            http: reqwest::Client::new(),
+            api_base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+        }
     }
 
+    /// Overrides the API base URL (builder pattern), useful for proxies or
+    /// local mock servers.
+    pub fn with_base_url(mut self, url: String) -> Self {
+        self.api_base_url = url;
+        self
+    }
+
+    /// Instantiates a `gemini_rust::Gemini` SDK client for the given model.
     fn create_client(&self, model: &str) -> Result<Gemini, LlmError> {
-        let model_path = if model.starts_with("models/") {
-            model.to_string()
-        } else {
-            format!("models/{model}")
-        };
-        Gemini::with_model(&self.api_key, model_path)
+        Gemini::with_model(&self.api_key, normalize_model_path(model))
             .map_err(|e| LlmError::NetworkError(format!("Failed to create Gemini client: {e:?}")))
     }
 
+    /// Translates a provider-agnostic [`ChatRequest`] into a Gemini-native
+    /// `ContentBuilder`, mapping messages, tool declarations, reasoning
+    /// effort, and generation parameters.
     fn build_request(
         &self,
         client: &Gemini,
@@ -121,6 +147,8 @@ impl GeminiProvider {
     }
 }
 
+/// Destructures a Gemini `GenerationResponse` into the normalised triple of
+/// content blocks, tool calls, and finish reason used by the shared types.
 fn extract_response(resp: &GenerationResponse) -> (Vec<ContentBlock>, Vec<ToolCall>, String) {
     let mut blocks = Vec::new();
     let mut tool_calls = Vec::new();
@@ -193,6 +221,8 @@ fn extract_response(resp: &GenerationResponse) -> (Vec<ContentBlock>, Vec<ToolCa
 
 #[async_trait::async_trait]
 impl LlmProvider for GeminiProvider {
+    /// Sends a non-streaming generate-content request and maps the response
+    /// into the unified [`ChatResponse`].
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         let client = self.create_client(&request.model)?;
         let builder = self.build_request(&client, &request)?;
@@ -239,6 +269,10 @@ impl LlmProvider for GeminiProvider {
         })
     }
 
+    /// Opens a streaming generate-content request.
+    ///
+    /// Spawns a background task that reads chunks from the Gemini stream and
+    /// forwards normalised [`ChatStreamEvent`]s through a bounded channel.
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
         let client = self.create_client(&request.model)?;
         let builder = self.build_request(&client, &request)?;
@@ -315,19 +349,16 @@ impl LlmProvider for GeminiProvider {
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 
+    /// Fetches the model's `inputTokenLimit` from the Gemini models endpoint.
     async fn get_context_window(&self, model: &str) -> Result<u32, LlmError> {
-        let model_path = if model.starts_with("models/") {
-            model.to_string()
-        } else {
-            format!("models/{model}")
-        };
+        let model_path = normalize_model_path(model);
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/{}?key={}",
-            model_path, self.api_key
+            "{}/{}?key={}",
+            self.api_base_url, model_path, self.api_key
         );
 
-        let http = reqwest::Client::new();
-        let resp = http
+        let resp = self
+            .http
             .get(&url)
             .send()
             .await

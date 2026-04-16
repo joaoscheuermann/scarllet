@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// On-disk record written by the core daemon so other processes (TUI, agents)
+/// can discover its PID and gRPC address without service-discovery overhead.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CoreLockfile {
     pub pid: u32,
@@ -11,11 +13,14 @@ pub struct CoreLockfile {
     pub started_at: u64,
 }
 
+/// Returns the platform-standard path to the `core.lock` file.
 pub fn path() -> PathBuf {
     let config_dir = dirs::config_dir().expect("could not determine OS config directory");
     config_dir.join("scarllet").join("core.lock")
 }
 
+/// Persists a lockfile recording the current process's PID, bound address,
+/// and start timestamp so clients can connect to the running daemon.
 pub fn write(addr: &SocketAddr) -> io::Result<()> {
     let lockfile = CoreLockfile {
         pid: std::process::id(),
@@ -35,6 +40,7 @@ pub fn write(addr: &SocketAddr) -> io::Result<()> {
     std::fs::write(&path, json)
 }
 
+/// Reads and deserializes the lockfile, returning `None` if the file does not exist.
 pub fn read() -> io::Result<Option<CoreLockfile>> {
     let path = path();
     if !path.exists() {
@@ -47,6 +53,7 @@ pub fn read() -> io::Result<Option<CoreLockfile>> {
     Ok(Some(lockfile))
 }
 
+/// Deletes the lockfile on daemon shutdown (best-effort, errors are silently ignored).
 pub fn remove() {
     let _ = std::fs::remove_file(path());
 }

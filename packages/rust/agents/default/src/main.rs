@@ -10,6 +10,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tracing::info;
 
+/// Sends a debug log event to the Core for display in the TUI debug panel.
 async fn debug_log(
     client: &mut OrchestratorClient<tonic::transport::Channel>,
     level: &str,
@@ -24,6 +25,7 @@ async fn debug_log(
         .await;
 }
 
+/// Prints the agent manifest JSON to stdout for Core auto-discovery.
 fn print_manifest() {
     let manifest = serde_json::json!({
         "name": "default",
@@ -34,6 +36,7 @@ fn print_manifest() {
     println!("{}", serde_json::to_string(&manifest).unwrap());
 }
 
+/// Assembles the system prompt with OS info and available tool descriptions.
 fn build_system_prompt(tools: &[ToolInfo]) -> String {
     let mut prompt = format!("Operating system: {}\n\n", std::env::consts::OS);
 
@@ -49,6 +52,7 @@ fn build_system_prompt(tools: &[ToolInfo]) -> String {
     prompt
 }
 
+/// Converts Core `ToolInfo` records into LLM-compatible `ToolDefinition` values.
 fn tools_to_definitions(tools: &[ToolInfo]) -> Vec<ToolDefinition> {
     tools
         .iter()
@@ -72,6 +76,7 @@ fn tools_to_definitions(tools: &[ToolInfo]) -> Vec<ToolDefinition> {
         .collect()
 }
 
+/// Truncates a string to `max` characters, appending `"..."` if shortened.
 fn truncate_preview(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -106,6 +111,7 @@ fn accumulate_tool_calls(
     }
 }
 
+/// Converts accumulated `(id, name, arguments, thought_signature)` tuples into `ToolCall` values.
 fn finalize_tool_calls(
     accumulated: Vec<(String, String, String, Option<String>)>,
 ) -> Vec<ToolCall> {
@@ -120,6 +126,7 @@ fn finalize_tool_calls(
         .collect()
 }
 
+/// Merges streaming thought/content deltas into the running list of `AgentBlock`s.
 fn accumulate_stream_deltas(blocks: &mut Vec<AgentBlock>, deltas: &[StreamDelta]) {
     for delta in deltas {
         let (bt, text) = match delta {
@@ -139,6 +146,20 @@ fn accumulate_stream_deltas(blocks: &mut Vec<AgentBlock>, deltas: &[StreamDelta]
     }
 }
 
+/// Borrowed references passed through the tool-loop to avoid threading individual parameters.
+struct AgentContext<'a> {
+    llm: &'a LlmClient,
+    client: &'a mut OrchestratorClient<tonic::transport::Channel>,
+    msg_tx: &'a tokio::sync::mpsc::Sender<AgentMessage>,
+    task: &'a AgentTask,
+    tool_definitions: &'a [ToolDefinition],
+    system_prompt: &'a str,
+    model: &'a str,
+    reasoning_effort: &'a Option<String>,
+    context_window: u32,
+}
+
+/// Extracts the concatenated text content from agent blocks, ignoring thoughts.
 fn blocks_to_content(blocks: &[AgentBlock]) -> String {
     blocks
         .iter()
@@ -148,6 +169,11 @@ fn blocks_to_content(blocks: &[AgentBlock]) -> String {
         .join("")
 }
 
+/// Entry point for the default agent process.
+///
+/// When invoked with `--manifest`, prints the agent descriptor and exits.
+/// Otherwise connects to the Core orchestrator, registers as `"default"`,
+/// and processes incoming tasks in a loop using the configured LLM provider.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -266,21 +292,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut blocks: Vec<AgentBlock> = Vec::new();
 
-        if let Err(e) = run_tool_loop(
-            &llm,
-            &mut client,
-            &msg_tx,
-            &task,
-            &mut history,
-            &tool_definitions,
-            &system_prompt,
-            &provider_resp.model,
-            &reasoning_effort,
-            &mut blocks,
+        let mut ctx = AgentContext {
+            llm: &llm,
+            client: &mut client,
+            msg_tx: &msg_tx,
+            task: &task,
+            tool_definitions: &tool_definitions,
+            system_prompt: &system_prompt,
+            model: &provider_resp.model,
+            reasoning_effort: &reasoning_effort,
             context_window,
-        )
-        .await
-        {
+        };
+
+        if let Err(e) = run_tool_loop(&mut ctx, &mut history, &mut blocks).await {
             let failure = AgentMessage {
                 payload: Some(agent_message::Payload::Failure(AgentFailure {
                     task_id: task.task_id.clone(),
@@ -295,52 +319,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Runs the LLM ↔ tool-call loop until the model produces a final response.
+///
+/// Each iteration streams an LLM completion, executes any requested tool calls
+/// through the Core, appends results to history, and loops back. The loop
+/// terminates when the model finishes without requesting more tool calls.
 async fn run_tool_loop(
-    llm: &LlmClient,
-    client: &mut OrchestratorClient<tonic::transport::Channel>,
-    msg_tx: &tokio::sync::mpsc::Sender<AgentMessage>,
-    task: &AgentTask,
+    ctx: &mut AgentContext<'_>,
     history: &mut Vec<ChatMessage>,
-    tool_definitions: &[ToolDefinition],
-    system_prompt: &str,
-    model: &str,
-    reasoning_effort: &Option<String>,
     blocks: &mut Vec<AgentBlock>,
-    context_window: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let mut messages = vec![ChatMessage {
             role: Role::System,
-            content: system_prompt.to_string(),
+            content: ctx.system_prompt.to_string(),
             tool_calls: None,
             tool_call_id: None,
         }];
         messages.extend(history.clone());
 
-        let tools = if tool_definitions.is_empty() {
+        let tools = if ctx.tool_definitions.is_empty() {
             None
         } else {
-            Some(tool_definitions.to_vec())
+            Some(ctx.tool_definitions.to_vec())
         };
 
         let request = ChatRequest {
-            model: model.to_string(),
+            model: ctx.model.to_string(),
             messages,
             temperature: None,
             max_tokens: None,
-            reasoning_effort: reasoning_effort.clone(),
+            reasoning_effort: ctx.reasoning_effort.clone(),
             extra_body: None,
             tools,
         };
 
-        debug_log(client, "debug", "Sending chat request to LLM").await;
+        debug_log(ctx.client, "debug", "Sending chat request to LLM").await;
 
-        let mut stream = match llm.chat_stream(request).await {
+        let mut stream = match ctx.llm.chat_stream(request).await {
             Ok(s) => s,
             Err(e) => {
                 debug_log(
-                    client,
+                    ctx.client,
                     "error",
                     &format!("LLM chat_stream failed: {e}"),
                 )
@@ -376,15 +396,15 @@ async fn run_tool_loop(
 
                     let progress = AgentMessage {
                         payload: Some(agent_message::Payload::Progress(AgentProgressMsg {
-                            task_id: task.task_id.clone(),
+                            task_id: ctx.task.task_id.clone(),
                             blocks: blocks.clone(),
                         })),
                     };
-                    let _ = msg_tx.send(progress).await;
+                    let _ = ctx.msg_tx.send(progress).await;
                 }
                 Err(e) => {
                     debug_log(
-                        client,
+                        ctx.client,
                         "error",
                         &format!("Stream chunk error: {e}"),
                     )
@@ -397,16 +417,16 @@ async fn run_tool_loop(
         if let Some(ref usage) = last_usage {
             let token_msg = AgentMessage {
                 payload: Some(agent_message::Payload::TokenUsage(AgentTokenUsageMsg {
-                    task_id: task.task_id.clone(),
+                    task_id: ctx.task.task_id.clone(),
                     total_tokens: usage.total_tokens,
-                    context_window,
+                    context_window: ctx.context_window,
                 })),
             };
-            let _ = msg_tx.send(token_msg).await;
+            let _ = ctx.msg_tx.send(token_msg).await;
         }
 
         debug_log(
-            client,
+            ctx.client,
             "debug",
             &format!(
                 "Stream ended: finish_reason=\"{finish_reason}\", tool_calls_accumulated={}",
@@ -425,18 +445,18 @@ async fn run_tool_loop(
 
             let result = AgentMessage {
                 payload: Some(agent_message::Payload::Result(AgentResultMsg {
-                    task_id: task.task_id.clone(),
+                    task_id: ctx.task.task_id.clone(),
                     blocks: blocks.clone(),
                 })),
             };
-            let _ = msg_tx.send(result).await;
+            let _ = ctx.msg_tx.send(result).await;
             return Ok(());
         }
 
         let tool_calls = finalize_tool_calls(accumulated_tool_calls);
 
         debug_log(
-            client,
+            ctx.client,
             "debug",
             &format!(
                 "Executing {} tool call(s): {:?}",
@@ -463,15 +483,15 @@ async fn run_tool_loop(
 
             let progress = AgentMessage {
                 payload: Some(agent_message::Payload::Progress(AgentProgressMsg {
-                    task_id: task.task_id.clone(),
+                    task_id: ctx.task.task_id.clone(),
                     blocks: blocks.clone(),
                 })),
             };
-            let _ = msg_tx.send(progress).await;
+            let _ = ctx.msg_tx.send(progress).await;
 
             let start_msg = AgentMessage {
                 payload: Some(agent_message::Payload::ToolCall(AgentToolCallMsg {
-                    task_id: task.task_id.clone(),
+                    task_id: ctx.task.task_id.clone(),
                     call_id: tc.id.clone(),
                     tool_name: tc.function.name.clone(),
                     arguments_preview: preview.clone(),
@@ -480,7 +500,7 @@ async fn run_tool_loop(
                     result: String::new(),
                 })),
             };
-            let _ = msg_tx.send(start_msg).await;
+            let _ = ctx.msg_tx.send(start_msg).await;
 
             let invoke_start = std::time::Instant::now();
 
@@ -488,15 +508,18 @@ async fn run_tool_loop(
                 serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
 
             if let serde_json::Value::Object(ref mut map) = args {
-                if !map.contains_key("working_directory") && !task.working_directory.is_empty() {
+                if !map.contains_key("working_directory")
+                    && !ctx.task.working_directory.is_empty()
+                {
                     map.insert(
                         "working_directory".to_string(),
-                        serde_json::Value::String(task.working_directory.clone()),
+                        serde_json::Value::String(ctx.task.working_directory.clone()),
                     );
                 }
             }
 
-            let tool_result = client
+            let tool_result = ctx
+                .client
                 .invoke_tool(ToolInvocation {
                     tool_name: tc.function.name.clone(),
                     input_json: serde_json::to_string(&args).unwrap_or_default(),
@@ -521,7 +544,7 @@ async fn run_tool_loop(
             let status = if success { "done" } else { "failed" };
             let done_msg = AgentMessage {
                 payload: Some(agent_message::Payload::ToolCall(AgentToolCallMsg {
-                    task_id: task.task_id.clone(),
+                    task_id: ctx.task.task_id.clone(),
                     call_id: tc.id.clone(),
                     tool_name: tc.function.name.clone(),
                     arguments_preview: preview,
@@ -530,7 +553,7 @@ async fn run_tool_loop(
                     result: result_content.clone(),
                 })),
             };
-            let _ = msg_tx.send(done_msg).await;
+            let _ = ctx.msg_tx.send(done_msg).await;
 
             history.push(ChatMessage {
                 role: Role::Tool,

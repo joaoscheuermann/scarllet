@@ -10,16 +10,19 @@ pub struct TuiSessionRegistry {
 }
 
 impl TuiSessionRegistry {
+    /// Initialises an empty session registry.
     pub fn new() -> Self {
         Self {
             sessions: HashMap::new(),
         }
     }
 
+    /// Adds a TUI session identified by a unique ID.
     pub fn register(&mut self, id: String, sender: mpsc::Sender<Result<CoreEvent, Status>>) {
         self.sessions.insert(id, sender);
     }
 
+    /// Removes a disconnected TUI session so it no longer receives events.
     pub fn deregister(&mut self, id: &str) {
         self.sessions.remove(id);
     }

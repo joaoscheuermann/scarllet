@@ -4,6 +4,8 @@ use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
+/// Endpoint paths that users commonly paste as part of the base URL.
+/// [`normalize_base_url`] strips these so the client can append them itself.
 const KNOWN_ENDPOINT_SUFFIXES: &[&str] = &["/chat/completions", "/completions", "/models"];
 
 /// Strips trailing slashes and known endpoint paths so users can paste the full
@@ -24,6 +26,10 @@ fn normalize_base_url(url: &str) -> String {
     url.trim_end_matches('/').to_string()
 }
 
+/// [`LlmProvider`] targeting the OpenAI chat-completions API.
+///
+/// Also works with any compatible endpoint (OpenRouter, vLLM, Ollama, etc.)
+/// by accepting a custom `base_url`.
 pub struct OpenAiProvider {
     api_key: String,
     base_url: String,
@@ -31,6 +37,8 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
+    /// Initialises the provider with credentials and a base URL that will be
+    /// normalised (trailing slashes / endpoint paths stripped).
     pub fn new(api_key: String, base_url: String) -> Self {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
@@ -45,6 +53,8 @@ impl OpenAiProvider {
         }
     }
 
+    /// Validates that the provider has a non-empty URL with an HTTP(S) scheme
+    /// and a non-empty API key before making any network calls.
     pub fn validate(&self) -> Result<(), LlmError> {
         if self.base_url.is_empty() {
             return Err(LlmError::InvalidConfig(
@@ -63,6 +73,8 @@ impl OpenAiProvider {
         Ok(())
     }
 
+    /// Fallback: fetches the full `/models` list and searches for the model
+    /// entry when the direct `/models/{id}` endpoint is not available.
     async fn get_context_window_from_list(&self, model: &str) -> Result<u32, LlmError> {
         let url = format!("{}/models", self.base_url);
         let resp = self
@@ -88,6 +100,7 @@ impl OpenAiProvider {
             .unwrap_or(0))
     }
 
+    /// Converts the provider-agnostic message list into the OpenAI wire format.
     fn build_oai_messages(messages: &[ChatMessage]) -> Vec<OaiMessage> {
         messages
             .iter()
@@ -119,6 +132,8 @@ impl OpenAiProvider {
             .collect()
     }
 
+    /// Produces an [`OaiReasoningConfig`] unless the caller already supplied a
+    /// Google-style `thinking_config` in `extra_body` (avoids double-sending).
     fn resolve_reasoning(
         reasoning_effort: Option<String>,
         extra_body: &Option<serde_json::Value>,
@@ -137,11 +152,13 @@ impl OpenAiProvider {
     }
 }
 
+/// Reasoning-effort hint sent as the `reasoning` field in the request body.
 #[derive(Serialize)]
 struct OaiReasoningConfig {
     effort: String,
 }
 
+/// Wire-format body sent to `/chat/completions`.
 #[derive(Serialize)]
 struct OaiRequest {
     model: String,
@@ -162,11 +179,14 @@ struct OaiRequest {
     tools: Option<Vec<OaiToolDef>>,
 }
 
+/// Options appended when `stream: true` to request usage metadata in the
+/// final SSE chunk.
 #[derive(Serialize)]
 struct OaiStreamOptions {
     include_usage: bool,
 }
 
+/// Single message in the OpenAI chat-completions wire format.
 #[derive(Serialize, Deserialize)]
 struct OaiMessage {
     role: String,
@@ -178,12 +198,14 @@ struct OaiMessage {
     tool_call_id: Option<String>,
 }
 
+/// Tool declaration in the OpenAI `tools` array.
 #[derive(Serialize, Deserialize)]
 struct OaiToolDef {
     r#type: String,
     function: OaiFunctionDef,
 }
 
+/// Function schema within an [`OaiToolDef`].
 #[derive(Serialize, Deserialize)]
 struct OaiFunctionDef {
     name: String,
@@ -191,6 +213,7 @@ struct OaiFunctionDef {
     parameters: serde_json::Value,
 }
 
+/// Tool invocation returned by the model in a non-streaming response.
 #[derive(Serialize, Deserialize, Clone)]
 struct OaiToolCall {
     id: String,
@@ -198,24 +221,29 @@ struct OaiToolCall {
     function: OaiFunctionCall,
 }
 
+/// Name + serialised arguments for a single function call.
 #[derive(Serialize, Deserialize, Clone)]
 struct OaiFunctionCall {
     name: String,
     arguments: String,
 }
 
+/// Top-level non-streaming response from `/chat/completions`.
 #[derive(Deserialize)]
 struct OaiResponse {
     choices: Vec<OaiChoice>,
     usage: Option<OaiUsage>,
 }
 
+/// A single completion choice from the response.
 #[derive(Deserialize)]
 struct OaiChoice {
     message: OaiChoiceMessage,
     finish_reason: Option<String>,
 }
 
+/// Message body inside a non-streaming choice, including optional reasoning
+/// fields used by o-series and compatible models.
 #[derive(Deserialize)]
 struct OaiChoiceMessage {
     role: String,
@@ -229,6 +257,7 @@ struct OaiChoiceMessage {
     tool_calls: Option<Vec<OaiToolCall>>,
 }
 
+/// Token-usage counters returned by the provider.
 #[derive(Deserialize)]
 struct OaiUsage {
     prompt_tokens: u32,
@@ -236,18 +265,21 @@ struct OaiUsage {
     total_tokens: u32,
 }
 
+/// Single SSE chunk in a streaming response.
 #[derive(Deserialize)]
 struct OaiStreamChunk {
     choices: Vec<OaiStreamChoice>,
     usage: Option<OaiUsage>,
 }
 
+/// Choice wrapper inside a streaming chunk.
 #[derive(Deserialize)]
 struct OaiStreamChoice {
     delta: OaiStreamDelta,
     finish_reason: Option<String>,
 }
 
+/// Incremental delta payload within a streaming choice.
 #[derive(Deserialize, Default)]
 struct OaiStreamDelta {
     #[serde(default)]
@@ -260,6 +292,7 @@ struct OaiStreamDelta {
     tool_calls: Option<Vec<OaiStreamToolCall>>,
 }
 
+/// Partial tool-call emitted over multiple streaming chunks.
 #[derive(Deserialize)]
 struct OaiStreamToolCall {
     index: usize,
@@ -269,6 +302,7 @@ struct OaiStreamToolCall {
     function: Option<OaiStreamFunctionCall>,
 }
 
+/// Partial function call data within a streaming tool-call delta.
 #[derive(Deserialize)]
 struct OaiStreamFunctionCall {
     #[serde(default)]
@@ -277,6 +311,7 @@ struct OaiStreamFunctionCall {
     arguments: Option<String>,
 }
 
+/// Maps a [`Role`] to the lowercase string the OpenAI API expects.
 fn role_to_string(r: &Role) -> String {
     match r {
         Role::System => "system",
@@ -287,6 +322,8 @@ fn role_to_string(r: &Role) -> String {
     .to_string()
 }
 
+/// Parses an OpenAI role string back into a [`Role`], defaulting unknown
+/// values to [`Role::User`].
 fn string_to_role(s: &str) -> Role {
     match s {
         "system" => Role::System,
@@ -296,6 +333,8 @@ fn string_to_role(s: &str) -> Role {
     }
 }
 
+/// Inspects the HTTP status for auth (401) or rate-limit (429) errors before
+/// the body is consumed, returning `None` for all other statuses.
 fn check_response_status(resp: &reqwest::Response) -> Option<LlmError> {
     let status = resp.status().as_u16();
     if status == 401 {
@@ -312,12 +351,15 @@ fn check_response_status(resp: &reqwest::Response) -> Option<LlmError> {
     None
 }
 
+/// Consumes the response body and wraps it in a [`LlmError::ServerError`].
 async fn read_error_body(resp: reqwest::Response) -> LlmError {
     let status = resp.status().as_u16();
     let body = resp.text().await.unwrap_or_default();
     LlmError::ServerError { status, body }
 }
 
+/// Extracts complete `data:` payloads from the SSE byte buffer, removing
+/// consumed bytes and leaving any partial block for the next read.
 fn drain_sse_events(buf: &mut BytesMut) -> Vec<String> {
     let mut events = Vec::new();
     loop {
@@ -344,6 +386,7 @@ fn drain_sse_events(buf: &mut BytesMut) -> Vec<String> {
     events
 }
 
+/// Converts the generic tool definitions into the OpenAI wire-format `tools` array.
 fn convert_tools(tools: &Option<Vec<ToolDefinition>>) -> Option<Vec<OaiToolDef>> {
     tools.as_ref().map(|defs| {
         defs.iter()
@@ -381,6 +424,8 @@ fn find_model_in_response<'a>(body: &'a serde_json::Value, model: &str) -> Optio
         .and_then(|arr| arr.iter().find(|m| m.get("id").and_then(|v| v.as_str()) == Some(model)))
 }
 
+/// Deserializes a single SSE `data:` payload into a [`ChatStreamEvent`],
+/// returning `None` for empty or no-op chunks.
 fn parse_stream_chunk(data: &str) -> Option<ChatStreamEvent> {
     let chunk: OaiStreamChunk = serde_json::from_str(data).ok()?;
 
@@ -485,6 +530,8 @@ fn spawn_sse_reader(resp: reqwest::Response) -> ChatStream {
 
 #[async_trait::async_trait]
 impl LlmProvider for OpenAiProvider {
+    /// Sends a non-streaming chat-completions request and maps the response
+    /// into the unified [`ChatResponse`], including reasoning blocks if present.
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         self.validate()?;
         let reasoning = Self::resolve_reasoning(request.reasoning_effort, &request.extra_body);
@@ -590,6 +637,8 @@ impl LlmProvider for OpenAiProvider {
         })
     }
 
+    /// Opens a streaming chat-completions request and returns the event
+    /// stream via [`spawn_sse_reader`].
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
         self.validate()?;
         let reasoning = Self::resolve_reasoning(request.reasoning_effort, &request.extra_body);
@@ -630,6 +679,8 @@ impl LlmProvider for OpenAiProvider {
         Ok(spawn_sse_reader(resp))
     }
 
+    /// Queries the provider for the model's context window size, trying the
+    /// direct `/models/{id}` endpoint first and falling back to the full list.
     async fn get_context_window(&self, model: &str) -> Result<u32, LlmError> {
         let url = format!("{}/models/{}", self.base_url, model);
         let resp = self

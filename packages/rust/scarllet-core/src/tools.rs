@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
+/// Outcome of a tool invocation, carrying either JSON output or an error.
 pub struct ToolResult {
     pub success: bool,
     pub output_json: String,
@@ -12,6 +13,11 @@ pub struct ToolResult {
     pub duration_ms: u64,
 }
 
+/// Runs a registered tool binary by piping `input_json` to its stdin.
+///
+/// Validates the snapshot ID to prevent stale-registry invocations, enforces
+/// the manifest-declared timeout, and returns structured success or error
+/// information.
 pub async fn invoke(
     registry: &Arc<RwLock<ModuleRegistry>>,
     tool_name: &str,

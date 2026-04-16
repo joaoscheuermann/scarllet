@@ -1,11 +1,15 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 
+/// An item that can be measured and painted inside a `ScrollView`.
 pub trait ScrollItem {
+    /// The item's total height in terminal rows.
     fn height(&self) -> u16;
+    /// Renders the item into the given area of the buffer.
     fn render_ref(&self, area: Rect, buf: &mut Buffer);
 }
 
+/// Persistent scroll position and content height for a `ScrollView`.
 #[derive(Debug, Clone, Default)]
 pub struct ScrollViewState {
     pub offset_y: u16,
@@ -13,14 +17,17 @@ pub struct ScrollViewState {
 }
 
 impl ScrollViewState {
+    /// Returns a state at scroll position zero.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Returns the maximum valid scroll offset for the current content height.
     pub fn max_offset(&self, viewport_height: u16) -> u16 {
         self.content_height.saturating_sub(viewport_height)
     }
 
+    /// Adjusts the scroll offset so the item at `item_y` is fully visible.
     pub fn ensure_visible(&mut self, item_y: u16, item_height: u16, viewport_height: u16) {
         if item_height >= viewport_height {
             self.offset_y = (item_y + item_height).saturating_sub(viewport_height);
@@ -31,14 +38,18 @@ impl ScrollViewState {
         }
     }
 
+    /// Pins the scroll position to the bottom (auto-follow mode).
     pub fn scroll_to_bottom(&mut self) {
         self.offset_y = u16::MAX;
     }
 }
 
+/// Stateless renderer that paints a list of `ScrollItem`s into a viewport with clipping.
 pub struct ScrollView;
 
 impl ScrollView {
+    /// Lays out items vertically with the given gap, clips to the viewport,
+    /// and auto-follows when the user was at the bottom before new content arrived.
     pub fn render(
         area: Rect,
         buf: &mut Buffer,

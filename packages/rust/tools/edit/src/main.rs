@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 
+/// A single text replacement: `old_text` → `new_text`.
 #[derive(Deserialize)]
 struct EditEntry {
     #[serde(alias = "oldText")]
@@ -12,12 +13,14 @@ struct EditEntry {
     new_text: String,
 }
 
+/// JSON input payload for the edit tool.
 #[derive(Deserialize)]
 struct EditInput {
     path: String,
     edits: Vec<EditEntry>,
 }
 
+/// JSON output payload returned to the agent with diff and status.
 #[derive(Serialize)]
 struct EditOutput {
     success: bool,
@@ -28,6 +31,7 @@ struct EditOutput {
     error: Option<String>,
 }
 
+/// Prints the tool manifest JSON to stdout for Core auto-discovery.
 fn print_manifest() {
     let manifest = serde_json::json!({
         "name": "edit",
@@ -67,10 +71,12 @@ fn print_manifest() {
     println!("{}", serde_json::to_string(&manifest).unwrap());
 }
 
+/// Normalizes all line endings to LF for consistent matching.
 fn normalize_to_lf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+/// Detects whether the file uses CRLF or LF line endings.
 fn detect_line_ending(content: &str) -> &'static str {
     let crlf_pos = content.find("\r\n");
     let lf_pos = content.find('\n');
@@ -80,6 +86,7 @@ fn detect_line_ending(content: &str) -> &'static str {
     }
 }
 
+/// Converts LF-normalized text back to the original line ending style.
 fn restore_line_endings(text: &str, ending: &str) -> String {
     if ending == "\r\n" {
         text.replace('\n', "\r\n")
@@ -88,6 +95,7 @@ fn restore_line_endings(text: &str, ending: &str) -> String {
     }
 }
 
+/// Splits off the UTF-8 BOM prefix if present, returning `(bom, rest)`.
 fn strip_bom(content: &str) -> (&str, &str) {
     if content.starts_with('\u{FEFF}') {
         ("\u{FEFF}", &content[3..])
@@ -96,6 +104,7 @@ fn strip_bom(content: &str) -> (&str, &str) {
     }
 }
 
+/// Strips trailing whitespace from each line for fuzzy matching.
 fn normalize_for_fuzzy(text: &str) -> String {
     text.lines()
         .map(|line| line.trim_end())
@@ -103,6 +112,9 @@ fn normalize_for_fuzzy(text: &str) -> String {
         .join("\n")
 }
 
+/// Finds `old_text` in `content`, falling back to whitespace-normalized matching.
+///
+/// Returns `(index, length, was_fuzzy)` or `None`.
 fn fuzzy_find(content: &str, old_text: &str) -> Option<(usize, usize, bool)> {
     if let Some(idx) = content.find(old_text) {
         return Some((idx, old_text.len(), false));
@@ -117,12 +129,14 @@ fn fuzzy_find(content: &str, old_text: &str) -> Option<(usize, usize, bool)> {
     None
 }
 
+/// Counts how many times `old_text` appears in `content` (fuzzy-normalized).
 fn count_occurrences(content: &str, old_text: &str) -> usize {
     let fuzzy_content = normalize_for_fuzzy(content);
     let fuzzy_old = normalize_for_fuzzy(old_text);
     fuzzy_content.matches(&fuzzy_old).count()
 }
 
+/// Produces a line-by-line unified diff with line numbers.
 fn generate_diff(old: &str, new: &str) -> (String, Option<usize>) {
     let diff = TextDiff::from_lines(old, new);
     let mut output = Vec::new();
@@ -163,6 +177,7 @@ fn generate_diff(old: &str, new: &str) -> (String, Option<usize>) {
     (output.join("\n"), first_changed_line)
 }
 
+/// An edit that has been located in the file content, ready for application.
 struct MatchedEdit {
     edit_index: usize,
     match_index: usize,
@@ -170,6 +185,7 @@ struct MatchedEdit {
     new_text: String,
 }
 
+/// Applies all edits to the file: validates uniqueness, checks for overlaps, writes, and diffs.
 fn execute(input: EditInput) -> EditOutput {
     let file_path = PathBuf::from(&input.path);
 
@@ -346,6 +362,7 @@ fn execute(input: EditInput) -> EditOutput {
     }
 }
 
+/// Entry point — reads edit instructions from stdin, applies them, and prints JSON output.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--manifest") {

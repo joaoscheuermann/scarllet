@@ -1,8 +1,6 @@
 use crate::registry::ModuleRegistry;
 use crate::sessions::TuiSessionRegistry;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
-use scarllet_proto::proto::core_event;
-use scarllet_proto::proto::{CoreEvent, ProviderInfoEvent};
 use scarllet_sdk::config::{self, ScarlletConfig};
 use scarllet_sdk::manifest::ModuleManifest;
 use std::path::{Path, PathBuf};
@@ -34,6 +32,8 @@ pub fn watched_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// Creates all watched directories that don't exist yet so the file watcher
+/// can attach to them immediately.
 pub fn ensure_dirs(dirs: &[PathBuf]) {
     for d in dirs {
         if let Err(e) = std::fs::create_dir_all(d) {
@@ -42,6 +42,8 @@ pub fn ensure_dirs(dirs: &[PathBuf]) {
     }
 }
 
+/// Performs an initial scan of module directories, then watches for filesystem
+/// changes and updates the registry when binaries are added or removed.
 pub async fn run(registry: Arc<RwLock<ModuleRegistry>>, dirs: Vec<PathBuf>) {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<notify::Result<Event>>(256);
 
@@ -105,6 +107,7 @@ pub async fn run(registry: Arc<RwLock<ModuleRegistry>>, dirs: Vec<PathBuf>) {
     drop(watcher);
 }
 
+/// Probes a newly appeared file for a manifest and registers it if valid.
 async fn handle_file_added(registry: &Arc<RwLock<ModuleRegistry>>, path: &Path) {
     match probe_manifest(path).await {
         Some(manifest) => {
@@ -117,12 +120,15 @@ async fn handle_file_added(registry: &Arc<RwLock<ModuleRegistry>>, path: &Path) 
     }
 }
 
+/// Removes a deleted file from the registry.
 async fn handle_file_removed(registry: &Arc<RwLock<ModuleRegistry>>, path: &Path) {
     if let Some(manifest) = registry.write().await.deregister(path) {
         info!("Deregistered {}: {}", manifest.kind_str(), manifest.name);
     }
 }
 
+/// Runs the binary at `path` with `--manifest` and deserialises the JSON
+/// output. Returns `None` on timeout, non-zero exit, or invalid JSON.
 async fn probe_manifest(path: &Path) -> Option<ModuleManifest> {
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         tokio::process::Command::new(path)
@@ -143,6 +149,8 @@ async fn probe_manifest(path: &Path) -> Option<ModuleManifest> {
     serde_json::from_slice(&output.stdout).ok()
 }
 
+/// Watches `config.json` for changes and hot-reloads the provider configuration,
+/// broadcasting a `ProviderInfo` event to all connected TUI sessions.
 pub async fn watch_config(
     config: Arc<RwLock<ScarlletConfig>>,
     session_registry: Arc<RwLock<TuiSessionRegistry>>,
@@ -203,25 +211,7 @@ pub async fn watch_config(
                 );
 
                 let cfg = config.read().await;
-                let event = match cfg.active_provider() {
-                    Some(p) => CoreEvent {
-                        payload: Some(core_event::Payload::ProviderInfo(ProviderInfoEvent {
-                            provider_name: p.name.clone(),
-                            model: p.model.clone(),
-                            reasoning_effort: p
-                                .reasoning_effort()
-                                .unwrap_or_default()
-                                .to_string(),
-                        })),
-                    },
-                    None => CoreEvent {
-                        payload: Some(core_event::Payload::ProviderInfo(ProviderInfoEvent {
-                            provider_name: String::new(),
-                            model: String::new(),
-                            reasoning_effort: String::new(),
-                        })),
-                    },
-                };
+                let event = crate::events::build_provider_info_event(&*cfg);
                 drop(cfg);
                 session_registry.read().await.broadcast(event);
             }
@@ -234,11 +224,14 @@ pub async fn watch_config(
     drop(watcher);
 }
 
+/// Extension trait for human-readable module kind labels in log messages.
 trait ManifestExt {
+    /// Returns a lowercase label like `"tool"`, `"command"`, or `"agent"`.
     fn kind_str(&self) -> &'static str;
 }
 
 impl ManifestExt for ModuleManifest {
+    /// Maps the enum variant to a static string for logging.
     fn kind_str(&self) -> &'static str {
         match self.kind {
             scarllet_sdk::manifest::ModuleKind::Command => "command",

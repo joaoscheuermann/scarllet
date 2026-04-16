@@ -3,12 +3,14 @@ use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 
+/// JSON input payload for the write tool.
 #[derive(Deserialize)]
 struct WriteInput {
     path: String,
     content: String,
 }
 
+/// JSON output payload returned to the agent.
 #[derive(Serialize)]
 struct WriteOutput {
     success: bool,
@@ -17,6 +19,7 @@ struct WriteOutput {
     error: Option<String>,
 }
 
+/// Prints the tool manifest JSON to stdout for Core auto-discovery.
 fn print_manifest() {
     let manifest = serde_json::json!({
         "name": "write",
@@ -42,6 +45,7 @@ fn print_manifest() {
     println!("{}", serde_json::to_string(&manifest).unwrap());
 }
 
+/// Writes content to the file, creating parent directories if needed.
 fn execute(input: WriteInput) -> WriteOutput {
     let file_path = PathBuf::from(&input.path);
 
@@ -73,6 +77,7 @@ fn execute(input: WriteInput) -> WriteOutput {
     }
 }
 
+/// Entry point — reads file content from stdin, writes it, and prints JSON output.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--manifest") {

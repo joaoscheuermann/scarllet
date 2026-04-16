@@ -7,12 +7,19 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Padding, Paragraph, Widget, Wrap};
 
 use super::scroll_view::ScrollItem;
-use crate::{ChatEntry, DisplayBlock, ToolCallData, ToolCallStatus};
+use crate::app::{ChatEntry, DisplayBlock, ToolCallData, ToolCallStatus};
 
+/// Background color applied to the focused message in history.
 const HIGHLIGHT_BG: Color = Color::Rgb(35, 35, 50);
+/// Left padding inside each message bubble.
 const PADDING_LEFT: u16 = 1;
+/// Right padding inside each message bubble.
 const PADDING_RIGHT: u16 = 1;
 
+/// Pre-rendered widget for a single chat message in the scroll view.
+///
+/// Converts a `ChatEntry` into styled ratatui `Line`s and caches the
+/// wrapped height so the scroll view can lay items out without re-measuring.
 pub struct ChatMessageWidget<'a> {
     lines: Vec<Line<'a>>,
     focused: bool,
@@ -20,6 +27,7 @@ pub struct ChatMessageWidget<'a> {
 }
 
 impl<'a> ChatMessageWidget<'a> {
+    /// Builds the rendered lines for a chat entry and pre-computes the wrapped height.
     pub fn new(
         entry: &'a ChatEntry,
         focused: bool,
@@ -41,10 +49,12 @@ impl<'a> ChatMessageWidget<'a> {
 }
 
 impl<'a> ScrollItem for ChatMessageWidget<'a> {
+    /// Returns the pre-computed wrapped height.
     fn height(&self) -> u16 {
         self.cached_height
     }
 
+    /// Paints the message lines into the buffer, applying focus highlight when selected.
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 {
             return;
@@ -59,6 +69,10 @@ impl<'a> ScrollItem for ChatMessageWidget<'a> {
     }
 }
 
+/// Converts a `ChatEntry` into styled ratatui `Line`s for rendering.
+///
+/// Handles user messages, agent responses (with typewriter budget),
+/// debug logs, and system notifications.
 fn build_lines<'a>(
     entry: &'a ChatEntry,
     tool_calls: &HashMap<String, ToolCallData>,
@@ -184,6 +198,7 @@ fn build_lines<'a>(
     lines
 }
 
+/// Returns an animated dots string that cycles every few ticks.
 fn thinking_dots(tick: u64) -> &'static str {
     match (tick / 3) % 4 {
         1 => ".",
@@ -193,6 +208,7 @@ fn thinking_dots(tick: u64) -> &'static str {
     }
 }
 
+/// Returns the byte index of the `max_chars`-th character in `s`.
 fn byte_offset_for_chars(s: &str, max_chars: usize) -> usize {
     s.char_indices()
         .nth(max_chars)
@@ -200,6 +216,7 @@ fn byte_offset_for_chars(s: &str, max_chars: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+/// Appends bordered lines showing a tool call's name, result preview, and status.
 fn render_tool_call_lines<'a>(tc: &ToolCallData, lines: &mut Vec<Line<'a>>, width: u16) {
     let border = Span::styled("│ ", Style::default().fg(Color::Rgb(100, 60, 140)));
     let content_w = width.saturating_sub(2) as usize;
@@ -248,6 +265,7 @@ fn render_tool_call_lines<'a>(tc: &ToolCallData, lines: &mut Vec<Line<'a>>, widt
     lines.extend(prepend_border(status_lines, border, content_w));
 }
 
+/// Prepends a vertical border span to each line, wrapping long lines at `content_width`.
 fn prepend_border<'a>(
     src_lines: Vec<Line<'a>>,
     border: Span<'a>,

@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::registry::ModuleRegistry;
 
+/// Lifecycle states a task transitions through from creation to completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskStatus {
     Pending,
@@ -17,6 +18,7 @@ pub enum TaskStatus {
 }
 
 impl std::fmt::Display for TaskStatus {
+    /// Renders the status as a lowercase string matching the proto contract.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Pending => write!(f, "pending"),
@@ -28,6 +30,7 @@ impl std::fmt::Display for TaskStatus {
     }
 }
 
+/// Full mutable snapshot of a single task, including its process ID and progress log.
 #[derive(Debug)]
 pub struct TaskState {
     pub task_id: String,
@@ -39,17 +42,20 @@ pub struct TaskState {
     pub pid: Option<u32>,
 }
 
+/// In-memory store for all tasks submitted during this core session.
 pub struct TaskManager {
     tasks: HashMap<String, TaskState>,
 }
 
 impl TaskManager {
+    /// Initialises an empty task store.
     pub fn new() -> Self {
         Self {
             tasks: HashMap::new(),
         }
     }
 
+    /// Creates a task in `Pending` state and returns its generated UUID.
     pub fn submit(
         &mut self,
         agent_name: String,
@@ -70,26 +76,31 @@ impl TaskManager {
         task_id
     }
 
+    /// Retrieves an immutable reference to a task by ID.
     pub fn get(&self, task_id: &str) -> Option<&TaskState> {
         self.tasks.get(task_id)
     }
 
+    /// Retrieves a mutable reference to a task by ID.
     pub fn get_mut(&mut self, task_id: &str) -> Option<&mut TaskState> {
         self.tasks.get_mut(task_id)
     }
 
+    /// Transitions a task to the given status. No-op if the task ID is unknown.
     pub fn set_status(&mut self, task_id: &str, status: TaskStatus) {
         if let Some(task) = self.tasks.get_mut(task_id) {
             task.status = status;
         }
     }
 
+    /// Appends a line to the task's progress log.
     pub fn add_progress(&mut self, task_id: &str, message: String) {
         if let Some(task) = self.tasks.get_mut(task_id) {
             task.progress_log.push(message);
         }
     }
 
+    /// Returns IDs of all pending or running tasks assigned to the named agent.
     pub fn active_tasks_for_agent(&self, agent_name: &str) -> Vec<String> {
         self.tasks
             .iter()
@@ -102,6 +113,11 @@ impl TaskManager {
     }
 }
 
+/// Spawns the agent binary as a child process and waits for it to exit.
+///
+/// Sets `SCARLLET_CORE_ADDR`, `SCARLLET_TASK_ID`, and `SCARLLET_SNAPSHOT_ID`
+/// in the child environment so the agent can connect back to the core.
+/// Updates the task status based on the process exit code.
 pub async fn spawn_agent(
     registry: &Arc<RwLock<ModuleRegistry>>,
     task_manager: &Arc<RwLock<TaskManager>>,
@@ -196,6 +212,10 @@ pub async fn spawn_agent(
     info!("Task {task_id} finished: {final_status}");
 }
 
+/// Kills the agent process for a running task and marks it cancelled.
+///
+/// On Unix, sends SIGTERM then SIGKILL after 2 seconds. On Windows, uses
+/// `taskkill /F`. Returns `false` if the task is not in `Running` state.
 pub async fn cancel_task(task_manager: &Arc<RwLock<TaskManager>>, task_id: &str) -> bool {
     let mut tm = task_manager.write().await;
     let task = match tm.get(task_id) {

@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+/// A single row of text after soft-wrapping, represented as a byte range into the buffer.
 #[derive(Debug, Clone)]
 pub struct VisualLine {
     pub byte_start: usize,
@@ -10,6 +11,10 @@ pub struct VisualLine {
     pub visual_width: u16,
 }
 
+/// Editable text buffer with cursor, selection, wrapping, and scroll state.
+///
+/// Powers the multi-line input field in the chat screen. All cursor
+/// positions are tracked as byte offsets into the UTF-8 string.
 #[derive(Debug, Clone, Default)]
 pub struct InputState {
     text: String,
@@ -19,14 +24,17 @@ pub struct InputState {
 }
 
 impl InputState {
+    /// Returns an empty input buffer.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Returns a reference to the raw text content.
     pub fn text(&self) -> &str {
         &self.text
     }
 
+    /// Replaces the buffer contents and moves the cursor to the end.
     pub fn set_text(&mut self, text: String) {
         self.text = text;
         self.cursor_byte_offset = self.text.len();
@@ -34,11 +42,13 @@ impl InputState {
         self.vertical_scroll = 0;
     }
 
+    /// Returns the cursor position as a byte offset.
     #[allow(dead_code)]
     pub fn cursor_byte_offset(&self) -> usize {
         self.cursor_byte_offset
     }
 
+    /// Returns the byte range of the current selection, if any.
     pub fn selection_range(&self) -> Option<(usize, usize)> {
         if let Some(anchor) = self.selection_anchor {
             if anchor != self.cursor_byte_offset {
@@ -51,6 +61,7 @@ impl InputState {
         None
     }
 
+    /// Removes the selected text and collapses the cursor. Returns `true` if text was deleted.
     pub fn delete_selection(&mut self) -> bool {
         if let Some((start, end)) = self.selection_range() {
             self.text.replace_range(start..end, "");
@@ -62,6 +73,7 @@ impl InputState {
         }
     }
 
+    /// Inserts a single character at the cursor, replacing any selection.
     pub fn insert_char(&mut self, c: char) {
         let c = if c == '\r' { '\n' } else { c };
         self.delete_selection();
@@ -69,6 +81,7 @@ impl InputState {
         self.cursor_byte_offset += c.len_utf8();
     }
 
+    /// Inserts a string at the cursor, normalizing line endings and replacing any selection.
     pub fn insert_str(&mut self, s: &str) {
         let cleaned = s.replace("\r\n", "\n").replace('\r', "\n");
         self.delete_selection();
@@ -76,6 +89,7 @@ impl InputState {
         self.cursor_byte_offset += cleaned.len();
     }
 
+    /// Deletes the grapheme before the cursor, or the selection if active.
     fn delete_backward(&mut self) {
         if self.delete_selection() {
             return;
@@ -95,6 +109,7 @@ impl InputState {
         self.cursor_byte_offset = prev_idx;
     }
 
+    /// Deletes the grapheme after the cursor, or the selection if active.
     fn delete_forward(&mut self) {
         if self.delete_selection() {
             return;
@@ -112,6 +127,8 @@ impl InputState {
         }
     }
 
+    /// Splits the buffer into visual lines at the given column width,
+    /// performing soft-wrap on grapheme boundaries.
     pub fn visual_lines(&self, wrap_width: u16) -> Vec<VisualLine> {
         let wrap_width = wrap_width.max(1) as usize;
         let mut lines = Vec::new();
@@ -168,6 +185,7 @@ impl InputState {
         lines
     }
 
+    /// Returns the cursor's `(column, row)` position in visual-line coordinates.
     pub fn cursor_visual_position(&self, wrap_width: u16) -> (u16, u16) {
         let lines = self.visual_lines(wrap_width);
         for (i, line) in lines.iter().enumerate() {
@@ -187,11 +205,13 @@ impl InputState {
         (0, 0)
     }
 
+    /// Returns true when the cursor is on the first visual row.
     pub fn is_at_top(&self, wrap_width: u16) -> bool {
         let (_, row) = self.cursor_visual_position(wrap_width);
         row == 0
     }
 
+    /// Starts or clears the selection anchor depending on whether Shift is held.
     fn set_selection(&mut self, shift: bool) {
         if shift {
             if self.selection_anchor.is_none() {
@@ -202,6 +222,7 @@ impl InputState {
         }
     }
 
+    /// Moves the cursor left or right by one grapheme, optionally extending the selection.
     fn move_horizontal(&mut self, delta: i32, shift: bool) {
         self.set_selection(shift);
         if delta < 0 {
@@ -228,6 +249,7 @@ impl InputState {
         }
     }
 
+    /// Moves the cursor up or down by one visual row, preserving the column position.
     fn move_vertical(&mut self, delta: i32, shift: bool, wrap_width: u16) {
         self.set_selection(shift);
         let lines = self.visual_lines(wrap_width);
@@ -254,6 +276,7 @@ impl InputState {
         self.cursor_byte_offset = new_offset;
     }
 
+    /// Dispatches a key event to the appropriate cursor/editing action.
     pub fn handle_key_event(&mut self, key: KeyEvent, wrap_width: u16) {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {

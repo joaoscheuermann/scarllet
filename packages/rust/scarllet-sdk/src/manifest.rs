@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+/// Metadata that every loadable module (agent, tool, or command) must declare.
+///
+/// The manifest drives discovery, routing, and capability negotiation inside
+/// the core daemon. It is typically embedded in the module binary and reported
+/// during the registration handshake.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleManifest {
     pub name: String,
@@ -16,11 +21,16 @@ pub struct ModuleManifest {
     pub aliases: Vec<String>,
 }
 
+/// Categorises a module so the core daemon can apply the correct lifecycle
+/// and routing semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModuleKind {
+    /// Slash-command that runs synchronously and returns once.
     Command,
+    /// Callable tool exposed to LLM function-calling.
     Tool,
+    /// Long-running conversational agent backed by an LLM.
     Agent,
 }
 

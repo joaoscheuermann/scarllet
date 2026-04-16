@@ -2,8 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::time::Duration;
 
+/// Default command timeout when none is specified in the input.
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
+/// JSON input payload for the terminal tool.
 #[derive(Deserialize)]
 struct TerminalInput {
     command: String,
@@ -13,6 +15,7 @@ struct TerminalInput {
     timeout_ms: Option<u64>,
 }
 
+/// JSON output payload returned to the agent after execution.
 #[derive(Serialize)]
 struct TerminalOutput {
     stdout: String,
@@ -20,6 +23,7 @@ struct TerminalOutput {
     exit_code: i32,
 }
 
+/// Prints the tool manifest JSON to stdout for Core auto-discovery.
 fn print_manifest() {
     let manifest = serde_json::json!({
         "name": "terminal",
@@ -49,6 +53,7 @@ fn print_manifest() {
     println!("{}", serde_json::to_string(&manifest).unwrap());
 }
 
+/// Returns the platform-appropriate shell binary (`cmd.exe` or `sh`).
 fn shell_program() -> &'static str {
     if cfg!(windows) {
         "cmd.exe"
@@ -57,6 +62,7 @@ fn shell_program() -> &'static str {
     }
 }
 
+/// Returns the shell flag used to pass a command string (`/C` or `-c`).
 fn shell_flag() -> &'static str {
     if cfg!(windows) {
         "/C"
@@ -65,6 +71,7 @@ fn shell_flag() -> &'static str {
     }
 }
 
+/// Entry point — reads a command from stdin, executes it, and prints JSON output.
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();

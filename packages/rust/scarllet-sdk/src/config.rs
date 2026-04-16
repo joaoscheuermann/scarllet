@@ -2,6 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::PathBuf;
 
+/// Top-level user configuration loaded from `config.json`.
+///
+/// Holds the list of LLM providers the user has set up and which one is
+/// currently selected. Serialized with camelCase keys to match the JSON
+/// schema exposed to end-users.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScarlletConfig {
@@ -11,19 +16,26 @@ pub struct ScarlletConfig {
     pub providers: Vec<Provider>,
 }
 
+/// Discriminator for the LLM API dialect a [`Provider`] speaks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderType {
+    /// OpenAI-compatible chat-completions API (also used by OpenRouter, local
+    /// inference servers, etc.).
     Openai,
+    /// Google Gemini / Generative Language API.
     Gemini,
 }
 
 impl Default for ProviderType {
+    /// Defaults to [`ProviderType::Openai`] since most third-party inference
+    /// endpoints expose an OpenAI-compatible surface.
     fn default() -> Self {
         Self::Openai
     }
 }
 
+/// Per-model overrides within a provider (e.g. reasoning effort level).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelConfig {
@@ -32,6 +44,10 @@ pub struct ModelConfig {
     pub reasoning: Option<String>,
 }
 
+/// A configured LLM provider with its credentials, endpoint, and model list.
+///
+/// One provider entry can expose multiple models; the `model` field selects
+/// which one is currently active.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Provider {
@@ -48,10 +64,14 @@ pub struct Provider {
 }
 
 impl Provider {
+    /// Returns the [`ModelConfig`] that matches the currently selected model id,
+    /// or `None` if no match exists in the models list.
     pub fn active_model_config(&self) -> Option<&ModelConfig> {
         self.models.iter().find(|m| m.id == self.model)
     }
 
+    /// Shortcut to the reasoning effort level configured on the active model
+    /// (e.g. `"low"`, `"medium"`, `"high"`).
     pub fn reasoning_effort(&self) -> Option<&str> {
         self.active_model_config()
             .and_then(|m| m.reasoning.as_deref())
@@ -59,6 +79,10 @@ impl Provider {
 }
 
 impl ScarlletConfig {
+    /// Looks up the provider whose name matches the current `provider` selector.
+    ///
+    /// Returns `None` when the selector is empty or no provider with that name
+    /// exists in the list.
     pub fn active_provider(&self) -> Option<&Provider> {
         if self.provider.is_empty() {
             return None;
@@ -67,11 +91,22 @@ impl ScarlletConfig {
     }
 }
 
-pub fn config_path() -> PathBuf {
-    let config_dir = dirs::config_dir().expect("could not determine OS config directory");
-    config_dir.join("scarllet").join("config.json")
+/// Builds the config file path relative to an arbitrary base directory.
+///
+/// Useful for testing or overriding the OS config root.
+pub fn config_path_in(base: &std::path::Path) -> PathBuf {
+    base.join("scarllet").join("config.json")
 }
 
+/// Returns the platform-standard path to `scarllet/config.json`.
+pub fn config_path() -> PathBuf {
+    config_path_in(&dirs::config_dir().expect("could not determine OS config directory"))
+}
+
+/// Loads the config from disk, creating a default file if none exists.
+///
+/// Malformed JSON is logged as a warning and falls back to defaults so the
+/// application can still start.
 pub fn load() -> io::Result<ScarlletConfig> {
     let path = config_path();
     if !path.exists() {
@@ -89,6 +124,8 @@ pub fn load() -> io::Result<ScarlletConfig> {
     }
 }
 
+/// Atomically writes the config to disk as pretty-printed JSON, creating
+/// parent directories if needed.
 pub fn save(config: &ScarlletConfig) -> io::Result<()> {
     let path = config_path();
     if let Some(parent) = path.parent() {

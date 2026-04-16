@@ -3,9 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+/// Maximum number of results before truncation.
 const DEFAULT_LIMIT: usize = 1000;
+/// Maximum total output size in bytes before truncation.
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 
+/// JSON input payload for the find tool.
 #[derive(Deserialize)]
 struct FindInput {
     pattern: String,
@@ -15,6 +18,7 @@ struct FindInput {
     limit: Option<usize>,
 }
 
+/// JSON output payload returned to the agent.
 #[derive(Serialize)]
 struct FindOutput {
     results: Vec<String>,
@@ -24,6 +28,7 @@ struct FindOutput {
     error: Option<String>,
 }
 
+/// Prints the tool manifest JSON to stdout for Core auto-discovery.
 fn print_manifest() {
     let manifest = serde_json::json!({
         "name": "find",
@@ -53,6 +58,7 @@ fn print_manifest() {
     println!("{}", serde_json::to_string(&manifest).unwrap());
 }
 
+/// Tests whether a path matches the given glob pattern.
 fn matches_glob(path: &str, pattern: &str) -> bool {
     let glob_pattern = glob::Pattern::new(pattern);
     match glob_pattern {
@@ -61,10 +67,12 @@ fn matches_glob(path: &str, pattern: &str) -> bool {
     }
 }
 
+/// Converts a path to forward-slash format for cross-platform consistency.
 fn to_posix(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// Walks the directory tree and collects paths matching the glob pattern.
 fn execute(input: FindInput) -> FindOutput {
     let search_dir = input.path.as_deref().unwrap_or(".");
     let search_path = PathBuf::from(search_dir);
@@ -147,6 +155,7 @@ fn execute(input: FindInput) -> FindOutput {
     }
 }
 
+/// Entry point — reads a glob pattern from stdin, finds matching files, and prints JSON output.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--manifest") {

@@ -1,3 +1,4 @@
+/// Reusable TUI widgets for the chat interface.
 pub mod chat_message;
 pub mod scroll_view;
 

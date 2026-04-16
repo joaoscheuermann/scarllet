@@ -5,10 +5,14 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+/// Maximum number of matches before truncation.
 const DEFAULT_LIMIT: usize = 100;
+/// Maximum total output size in bytes before truncation.
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
+/// Lines longer than this are truncated in the output.
 const MAX_LINE_LENGTH: usize = 500;
 
+/// JSON input payload for the grep tool.
 #[derive(Deserialize)]
 struct GrepInput {
     pattern: String,
@@ -26,6 +30,7 @@ struct GrepInput {
     limit: Option<usize>,
 }
 
+/// A single matching line with its file path, line number, and optional context.
 #[derive(Serialize)]
 struct GrepMatch {
     file: String,
@@ -37,6 +42,7 @@ struct GrepMatch {
     context_after: Vec<String>,
 }
 
+/// JSON output payload returned to the agent.
 #[derive(Serialize)]
 struct GrepOutput {
     matches: Vec<GrepMatch>,
@@ -47,6 +53,7 @@ struct GrepOutput {
     error: Option<String>,
 }
 
+/// Prints the tool manifest JSON to stdout for Core auto-discovery.
 fn print_manifest() {
     let manifest = serde_json::json!({
         "name": "grep",
@@ -92,6 +99,7 @@ fn print_manifest() {
     println!("{}", serde_json::to_string(&manifest).unwrap());
 }
 
+/// Truncates a line to `MAX_LINE_LENGTH`, returning the result and whether it was trimmed.
 fn truncate_line(line: &str) -> (String, bool) {
     if line.len() <= MAX_LINE_LENGTH {
         (line.to_string(), false)
@@ -103,10 +111,12 @@ fn truncate_line(line: &str) -> (String, bool) {
     }
 }
 
+/// Converts a path to forward-slash format for cross-platform consistency.
 fn to_posix(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// Searches file contents for the pattern and collects matching lines with context.
 fn execute(input: GrepInput) -> GrepOutput {
     let search_dir = input.path.as_deref().unwrap_or(".");
     let search_path = PathBuf::from(search_dir);
@@ -286,6 +296,7 @@ fn execute(input: GrepInput) -> GrepOutput {
     }
 }
 
+/// Entry point — reads a search pattern from stdin, greps file contents, and prints JSON output.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--manifest") {

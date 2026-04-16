@@ -1,12 +1,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Lightweight snapshot of git HEAD state for status-bar display.
 pub struct GitInfo {
     pub branch: Option<String>,
     pub short_sha: String,
     pub detached: bool,
 }
 
+/// Reads branch name and HEAD SHA directly from `.git/` without shelling out.
 pub fn read_git_info(cwd: &Path) -> Option<GitInfo> {
     let git_dir = find_git_dir(cwd)?;
     let head_contents = fs::read_to_string(git_dir.join("HEAD")).ok()?;
@@ -40,6 +42,7 @@ pub fn read_git_info(cwd: &Path) -> Option<GitInfo> {
     None
 }
 
+/// Walks up from `dir` to locate the `.git` directory or gitdir reference.
 fn find_git_dir(mut dir: &Path) -> Option<PathBuf> {
     loop {
         let candidate = dir.join(".git");
@@ -60,6 +63,7 @@ fn find_git_dir(mut dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Looks up a ref SHA in `.git/packed-refs` when the loose ref file is absent.
 fn resolve_packed_ref(git_dir: &Path, ref_path: &str) -> Option<String> {
     let packed = fs::read_to_string(git_dir.join("packed-refs")).ok()?;
     for line in packed.lines() {
@@ -76,10 +80,12 @@ fn resolve_packed_ref(git_dir: &Path, ref_path: &str) -> Option<String> {
     None
 }
 
+/// Truncates a full SHA to its first 7 hex characters.
 fn abbreviate_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 
+/// Replaces the home directory prefix with `~` for compact display.
 pub fn abbreviate_home(path: &Path) -> String {
     if let Some(home) = dirs::home_dir() {
         if let Ok(rest) = path.strip_prefix(&home) {
