@@ -22,7 +22,9 @@ impl ScrollViewState {
     }
 
     pub fn ensure_visible(&mut self, item_y: u16, item_height: u16, viewport_height: u16) {
-        if item_y < self.offset_y {
+        if item_height >= viewport_height {
+            self.offset_y = (item_y + item_height).saturating_sub(viewport_height);
+        } else if item_y < self.offset_y {
             self.offset_y = item_y;
         } else if item_y + item_height > self.offset_y + viewport_height {
             self.offset_y = (item_y + item_height).saturating_sub(viewport_height);

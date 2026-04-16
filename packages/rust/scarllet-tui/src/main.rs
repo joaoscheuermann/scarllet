@@ -94,6 +94,7 @@ struct App {
     wrap_width: u16,
     scroll_view_state: widgets::ScrollViewState,
     focused_message_idx: Option<usize>,
+    history_viewport_height: u16,
     tick: u64,
     stream_closed: bool,
     message_tx: mpsc::Sender<TuiMessage>,
@@ -134,6 +135,7 @@ impl App {
             wrap_width: 80,
             scroll_view_state: widgets::ScrollViewState::new(),
             focused_message_idx: None,
+            history_viewport_height: 0,
             tick: 0,
             stream_closed: false,
             message_tx,
@@ -354,10 +356,14 @@ fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
                 app.input_state.insert_char(c);
             }
             KeyCode::PageUp => {
-                app.scroll_view_state.offset_y = app.scroll_view_state.offset_y.saturating_sub(1);
+                let page = app.history_viewport_height.max(1);
+                app.scroll_view_state.offset_y =
+                    app.scroll_view_state.offset_y.saturating_sub(page);
             }
             KeyCode::PageDown => {
-                app.scroll_view_state.offset_y += 1;
+                let page = app.history_viewport_height.max(1);
+                app.scroll_view_state.offset_y =
+                    app.scroll_view_state.offset_y.saturating_add(page);
             }
             _ => {}
         }
@@ -413,10 +419,14 @@ fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
             app.input_state.insert_str("  ");
             return false;
         } else if key.code == KeyCode::PageUp {
-            app.scroll_view_state.offset_y = app.scroll_view_state.offset_y.saturating_sub(1);
+            let page = app.history_viewport_height.max(1);
+            app.scroll_view_state.offset_y =
+                app.scroll_view_state.offset_y.saturating_sub(page);
             return false;
         } else if key.code == KeyCode::PageDown {
-            app.scroll_view_state.offset_y += 1;
+            let page = app.history_viewport_height.max(1);
+            app.scroll_view_state.offset_y =
+                app.scroll_view_state.offset_y.saturating_add(page);
             return false;
         } else if key.code == KeyCode::Up
             && !has_shift
@@ -431,10 +441,14 @@ fn handle_input(app: &mut App, key: crossterm::event::KeyEvent) -> bool {
     } else {
         match key.code {
             KeyCode::PageUp | KeyCode::Up => {
-                app.scroll_view_state.offset_y = app.scroll_view_state.offset_y.saturating_sub(1);
+                let page = app.history_viewport_height.max(1);
+                app.scroll_view_state.offset_y =
+                    app.scroll_view_state.offset_y.saturating_sub(page);
             }
             KeyCode::PageDown | KeyCode::Down => {
-                app.scroll_view_state.offset_y += 1;
+                let page = app.history_viewport_height.max(1);
+                app.scroll_view_state.offset_y =
+                    app.scroll_view_state.offset_y.saturating_add(page);
             }
             _ => {}
         }
@@ -648,6 +662,7 @@ fn draw_history(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    app.history_viewport_height = inner.height;
 
     if app.messages.is_empty() {
         let welcome = Paragraph::new(vec![
@@ -979,7 +994,9 @@ async fn connect_and_stream(
         return;
     };
 
-    let mut client = OrchestratorClient::new(channel);
+    let mut client = OrchestratorClient::new(channel)
+        .max_decoding_message_size(64 * 1024 * 1024)
+        .max_encoding_message_size(64 * 1024 * 1024);
     let outgoing = ReceiverStream::new(message_rx);
 
     let Ok(response) = client.attach_tui(outgoing).await else {

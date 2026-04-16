@@ -164,7 +164,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Default agent starting, connecting to Core at {core_addr}");
 
     let endpoint = format!("http://{core_addr}");
-    let mut client = OrchestratorClient::connect(endpoint).await?;
+    let mut client = OrchestratorClient::connect(endpoint)
+        .await?
+        .max_decoding_message_size(64 * 1024 * 1024)
+        .max_encoding_message_size(64 * 1024 * 1024);
 
     let (msg_tx, msg_rx) = tokio::sync::mpsc::channel::<AgentMessage>(64);
     let outgoing = ReceiverStream::new(msg_rx);

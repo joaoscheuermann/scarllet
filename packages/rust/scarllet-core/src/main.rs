@@ -734,7 +734,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let incoming = TcpListenerStream::new(listener);
 
     tonic::transport::Server::builder()
-        .add_service(OrchestratorServer::new(service))
+        .add_service(
+            OrchestratorServer::new(service)
+                .max_decoding_message_size(64 * 1024 * 1024)
+                .max_encoding_message_size(64 * 1024 * 1024),
+        )
         .serve_with_incoming_shutdown(incoming, async {
             let _ = shutdown_rx.await;
             info!("Shutdown signal received");
