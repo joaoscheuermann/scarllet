@@ -165,16 +165,6 @@ struct AgentContext<'a> {
     context_window: u32,
 }
 
-/// Extracts the concatenated text content from agent blocks, ignoring thoughts.
-fn blocks_to_content(blocks: &[AgentBlock]) -> String {
-    blocks
-        .iter()
-        .filter(|b| b.block_type == "text")
-        .map(|b| b.content.as_str())
-        .collect::<Vec<_>>()
-        .join("")
-}
-
 /// Entry point for the default agent process.
 ///
 /// When invoked with `--manifest`, prints the agent descriptor and exits.
@@ -462,7 +452,7 @@ async fn run_tool_loop(
         if accumulated_tool_calls.is_empty() {
             history.push(ChatMessage {
                 role: Role::Assistant,
-                content: blocks_to_content(blocks),
+                content: scarllet_proto::blocks_to_text(blocks),
                 tool_calls: None,
                 tool_call_id: None,
             });
@@ -495,7 +485,7 @@ async fn run_tool_loop(
 
         history.push(ChatMessage {
             role: Role::Assistant,
-            content: blocks_to_content(blocks),
+            content: scarllet_proto::blocks_to_text(blocks),
             tool_calls: Some(tool_calls.clone()),
             tool_call_id: None,
         });

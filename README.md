@@ -53,18 +53,16 @@ The `Orchestrator` service in `orchestrator.proto` defines these RPCs:
 
 | RPC                 | Direction            | Purpose                                                    |
 | ------------------- | -------------------- | ---------------------------------------------------------- |
-| `Ping`              | unary                | Uptime check                                               |
-| `ListCommands`      | unary                | Return registered slash-commands                           |
 | `GetToolRegistry`   | unary                | Return all discovered tools                                |
 | `GetActiveProvider` | unary                | Return active LLM provider config                          |
 | `InvokeTool`        | unary                | Execute a tool by name with JSON input                     |
-| `SubmitTask`        | unary                | Submit a new task to an agent                              |
-| `CancelTask`        | unary                | Cancel a running task                                      |
-| `ReportProgress`    | unary                | Agent reports intermediate progress                        |
-| `GetAgentStatus`    | unary                | Query task/agent status                                    |
+| `EmitDebugLog`      | unary                | Agents emit structured debug logs                          |
 | `AttachTui`         | bidirectional stream | TUI sends prompts / receives `CoreEvent`s                  |
 | `AgentStream`       | bidirectional stream | Agent receives `AgentInstruction`s / sends `AgentMessage`s |
-| `EmitDebugLog`      | unary                | Agents emit structured debug logs                          |
+
+Task lifecycle (submit / cancel / progress / status) and slash-commands are
+handled in-band over `AttachTui` and `AgentStream`, so no dedicated unary RPCs
+are exposed for them.
 
 ## Runtime Layout
 

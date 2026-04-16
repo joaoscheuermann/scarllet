@@ -3,35 +3,20 @@ syntax = "proto3";
 package scarllet;
 
 service Orchestrator {
-  rpc Ping(PingRequest) returns (PingResponse);
-  rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
   rpc GetToolRegistry(ToolRegistryQuery) returns (ToolRegistryResponse);
   rpc GetActiveProvider(ActiveProviderQuery) returns (ActiveProviderResponse);
   rpc InvokeTool(ToolInvocation) returns (ToolResult);
-  rpc SubmitTask(TaskSubmission) returns (TaskReceipt);
-  rpc CancelTask(CancelRequest) returns (CancelResponse);
-  rpc ReportProgress(ProgressReport) returns (Ack);
-  rpc GetAgentStatus(AgentStatusQuery) returns (AgentStatusResponse);
   rpc AttachTui(stream TuiMessage) returns (stream CoreEvent);
   rpc AgentStream(stream AgentMessage) returns (stream AgentInstruction);
   rpc EmitDebugLog(DebugLogRequest) returns (Ack);
 }
 
+message Ack {}
+
 message DebugLogRequest {
   string source = 1;
   string level = 2;
   string message = 3;
-}
-
-message PingRequest {}
-message PingResponse { uint64 uptime_secs = 1; }
-
-message ListCommandsRequest {}
-message ListCommandsResponse { repeated CommandInfo commands = 1; }
-message CommandInfo {
-  string name = 1;
-  repeated string aliases = 2;
-  string description = 3;
 }
 
 message ToolRegistryQuery {}
@@ -64,35 +49,6 @@ message ToolResult {
   string output_json = 2;
   string error_message = 3;
   uint64 duration_ms = 4;
-}
-
-message TaskSubmission {
-  string agent_name = 1;
-  string task_description = 2;
-  string working_directory = 3;
-}
-message TaskReceipt {
-  string task_id = 1;
-  uint64 snapshot_id = 2;
-}
-
-message CancelRequest { string task_id = 1; }
-message CancelResponse { bool success = 1; }
-
-message ProgressReport {
-  string task_id = 1;
-  string status = 2;
-  string message = 3;
-}
-message Ack {}
-
-message AgentStatusQuery { string task_id = 1; }
-message AgentStatusResponse {
-  string task_id = 1;
-  string agent_name = 2;
-  string status = 3;
-  repeated string progress_log = 4;
-  string working_directory = 5;
 }
 
 // Bidirectional TUI streaming

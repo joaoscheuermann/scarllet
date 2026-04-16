@@ -107,7 +107,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     lockfile::remove();
     info!("Core stopped");
-    println!("Core stopped");
 
     Ok(())
 }

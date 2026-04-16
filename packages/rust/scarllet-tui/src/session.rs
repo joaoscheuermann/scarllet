@@ -2,7 +2,6 @@ use std::io;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────
 // Data models
@@ -156,61 +155,33 @@ impl SessionRepository for NullSessionRepository {
     }
 }
 
-// ─────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────
-
-/// Creates a fresh session with the given ID.
-pub fn new_session(id: String) -> Session {
-    let now = chrono::Utc::now().to_rfc3339();
-    Session {
-        id,
-        created_at: now.clone(),
-        updated_at: now,
-        messages: Vec::new(),
-    }
-}
-
-/// Updates the session's `updated_at` and appends a message.
-pub fn append_message(session: &mut Session, role: MessageRole, content: String) {
-    session.updated_at = chrono::Utc::now().to_rfc3339();
-    session.messages.push(SessionMessage {
-        id: Uuid::new_v4().to_string(),
-        role,
-        content,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        agent_name: None,
-        task_id: None,
-        blocks: None,
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn new_session_has_no_messages() {
-        let s = new_session("test-id".into());
-        assert!(s.messages.is_empty());
-        assert_eq!(s.id, "test-id");
-    }
-
-    #[test]
-    fn append_message_updates_timestamp() {
-        let mut s = new_session("id".into());
-        append_message(&mut s, MessageRole::User, "Hello".into());
-        assert_eq!(s.messages.len(), 1);
-        assert_eq!(s.messages[0].content, "Hello");
-        assert_eq!(s.messages[0].role, MessageRole::User);
-        assert!(s.updated_at >= s.created_at);
+    fn message(role: MessageRole, content: &str) -> SessionMessage {
+        SessionMessage {
+            id: "fixed-id".into(),
+            role,
+            content: content.into(),
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            agent_name: None,
+            task_id: None,
+            blocks: None,
+        }
     }
 
     #[test]
     fn session_serialize_roundtrip() {
-        let mut s = new_session("roundtrip".into());
-        append_message(&mut s, MessageRole::User, "hi".into());
-        append_message(&mut s, MessageRole::Assistant, "hello".into());
+        let s = Session {
+            id: "roundtrip".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            messages: vec![
+                message(MessageRole::User, "hi"),
+                message(MessageRole::Assistant, "hello"),
+            ],
+        };
 
         let json = serde_json::to_string_pretty(&s).unwrap();
         let loaded: Session = serde_json::from_str(&json).unwrap();

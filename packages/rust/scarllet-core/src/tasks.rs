@@ -31,9 +31,11 @@ impl std::fmt::Display for TaskStatus {
 }
 
 /// Full mutable snapshot of a single task, including its process ID and progress log.
+///
+/// The task ID lives in the owning [`TaskManager`] HashMap key — the struct itself
+/// carries only per-task mutable state.
 #[derive(Debug)]
 pub struct TaskState {
-    pub task_id: String,
     pub agent_name: String,
     pub status: TaskStatus,
     pub progress_log: Vec<String>,
@@ -64,7 +66,6 @@ impl TaskManager {
     ) -> String {
         let task_id = Uuid::new_v4().to_string();
         let state = TaskState {
-            task_id: task_id.clone(),
             agent_name,
             status: TaskStatus::Pending,
             progress_log: vec![],
@@ -98,6 +99,27 @@ impl TaskManager {
         if let Some(task) = self.tasks.get_mut(task_id) {
             task.progress_log.push(message);
         }
+    }
+
+    /// Returns the agent name recorded for `task_id`, or the empty string when
+    /// the task is unknown. This matches the semantics callers previously
+    /// implemented inline with `get(..).map(..).unwrap_or_default()`.
+    pub fn agent_name_for(&self, task_id: &str) -> String {
+        self.get(task_id)
+            .map(|t| t.agent_name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Transitions a task to [`TaskStatus::Completed`]. No-op on unknown IDs.
+    pub fn mark_completed(&mut self, task_id: &str) {
+        self.set_status(task_id, TaskStatus::Completed);
+    }
+
+    /// Transitions a task to [`TaskStatus::Failed`] and appends `reason` to its
+    /// progress log. No-op on unknown IDs.
+    pub fn mark_failed(&mut self, task_id: &str, reason: &str) {
+        self.set_status(task_id, TaskStatus::Failed);
+        self.add_progress(task_id, reason.into());
     }
 
     /// Returns IDs of all pending or running tasks regardless of agent.
@@ -276,6 +298,34 @@ mod tests {
 
         tm.set_status(&id, TaskStatus::Completed);
         assert_eq!(tm.get(&id).unwrap().status, TaskStatus::Completed);
+    }
+
+    #[test]
+    fn agent_name_for_is_empty_when_missing() {
+        let tm = TaskManager::new();
+        assert_eq!(tm.agent_name_for("unknown"), "");
+    }
+
+    #[test]
+    fn agent_name_for_returns_recorded_name() {
+        let mut tm = TaskManager::new();
+        let id = tm.submit("default".into(), "/tmp".into(), 1);
+        assert_eq!(tm.agent_name_for(&id), "default");
+    }
+
+    #[test]
+    fn mark_completed_and_failed_transition_status_and_log() {
+        let mut tm = TaskManager::new();
+        let ok_id = tm.submit("a".into(), "/tmp".into(), 1);
+        let fail_id = tm.submit("b".into(), "/tmp".into(), 1);
+
+        tm.mark_completed(&ok_id);
+        tm.mark_failed(&fail_id, "boom");
+
+        assert_eq!(tm.get(&ok_id).unwrap().status, TaskStatus::Completed);
+        let failed = tm.get(&fail_id).unwrap();
+        assert_eq!(failed.status, TaskStatus::Failed);
+        assert_eq!(failed.progress_log, vec!["boom".to_string()]);
     }
 
     #[test]

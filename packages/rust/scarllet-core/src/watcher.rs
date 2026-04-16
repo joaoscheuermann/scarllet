@@ -211,7 +211,7 @@ pub async fn watch_config(
                 );
 
                 let cfg = config.read().await;
-                let event = crate::events::build_provider_info_event(&*cfg);
+                let event = crate::events::provider_info(&cfg);
                 drop(cfg);
                 session_registry.read().await.broadcast(event);
             }
