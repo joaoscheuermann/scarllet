@@ -185,7 +185,7 @@ fn execute(input: GrepInput) -> GrepOutput {
 
         walker
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map_or(false, |ft| ft.is_file()))
+            .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
             .map(|e| e.into_path())
             .collect()
     };
@@ -198,7 +198,7 @@ fn execute(input: GrepInput) -> GrepOutput {
                 .unwrap_or_default();
             let relative = file_path
                 .strip_prefix(&search_path)
-                .map(|r| to_posix(r))
+                .map(to_posix)
                 .unwrap_or_else(|_| to_posix(file_path));
             if !gp.matches(&name) && !gp.matches(&relative) {
                 continue;
@@ -219,7 +219,7 @@ fn execute(input: GrepInput) -> GrepOutput {
         } else {
             file_path
                 .strip_prefix(&search_path)
-                .map(|r| to_posix(r))
+                .map(to_posix)
                 .unwrap_or_else(|_| to_posix(file_path))
         };
 

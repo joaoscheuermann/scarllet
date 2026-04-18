@@ -1,4 +1,13 @@
+//! Tool invocation — external modules + the synthetic `spawn_sub_agent`
+//! built-in.
+//!
+//! Both surfaces return a common [`ToolResult`] shape so agents see a
+//! uniform tool-call outcome regardless of whether the call crossed a
+//! subprocess boundary or was handled entirely inside core.
+
+use crate::agents;
 use crate::registry::ModuleRegistry;
+use crate::session::SessionRegistry;
 use scarllet_sdk::manifest::ModuleKind;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,27 +22,69 @@ pub struct ToolResult {
     pub duration_ms: u64,
 }
 
-/// Runs a registered tool binary by piping `input_json` to its stdin.
-///
-/// Validates the snapshot ID to prevent stale-registry invocations, enforces
-/// the manifest-declared timeout, and returns structured success or error
-/// information.
+/// Reserved tool name routed to the core-internal sub-agent spawn path.
+pub const SPAWN_SUB_AGENT_TOOL: &str = "spawn_sub_agent";
+
+/// Synthetic tool description advertised in `GetToolRegistry` so agents can
+/// discover the sub-agent spawn affordance from the same surface as every
+/// other tool. The runtime branch in [`invoke`] delegates to
+/// [`agents::spawn::handle_spawn_sub_agent`].
+pub const SPAWN_SUB_AGENT_DESCRIPTION: &str =
+    "Spawn a sub-agent to handle a focused sub-task. Pass `{ \"agent_module\": \"<name>\", \"prompt\": \"<task>\" }`. The call blocks until the sub-agent emits its final Result; the returned output_json carries `{ content, finish_reason }`.";
+
+/// JSON Schema string for the synthetic `spawn_sub_agent` manifest entry.
+/// Kept here so both the registry RPC and the runtime branch agree on shape.
+pub const SPAWN_SUB_AGENT_INPUT_SCHEMA: &str = r#"{
+    "type": "object",
+    "properties": {
+        "agent_module": { "type": "string", "description": "name of an installed agent module" },
+        "prompt": { "type": "string", "description": "instruction for the sub-agent" }
+    },
+    "required": ["agent_module", "prompt"]
+}"#;
+
+/// Routes a tool invocation. Branches on the synthetic `spawn_sub_agent`
+/// name so the core-internal spawn path is exercised without leaking
+/// through the external-tool manifest resolver; everything else falls
+/// through to [`invoke_external`].
 pub async fn invoke(
+    sessions: &Arc<RwLock<SessionRegistry>>,
     registry: &Arc<RwLock<ModuleRegistry>>,
+    core_addr: &str,
+    session_id: &str,
+    agent_id: &str,
     tool_name: &str,
     input_json: &str,
-    snapshot_id: u64,
+) -> ToolResult {
+    if tool_name == SPAWN_SUB_AGENT_TOOL {
+        return agents::spawn::handle_spawn_sub_agent(
+            sessions,
+            registry,
+            core_addr,
+            session_id,
+            agent_id,
+            input_json,
+        )
+        .await;
+    }
+    invoke_external(registry, session_id, agent_id, tool_name, input_json).await
+}
+
+/// Runs a registered tool binary by piping `input_json` to its stdin.
+///
+/// Looks up the manifest by name in the per-process [`ModuleRegistry`],
+/// enforces the manifest-declared timeout, and returns structured success
+/// or error information. `session_id` and `agent_id` are forwarded to the
+/// child process via `SCARLLET_SESSION_ID` / `SCARLLET_AGENT_ID` so tools
+/// that want to audit-log have the originating identity.
+pub async fn invoke_external(
+    registry: &Arc<RwLock<ModuleRegistry>>,
+    session_id: &str,
+    agent_id: &str,
+    tool_name: &str,
+    input_json: &str,
 ) -> ToolResult {
     let reg = registry.read().await;
-
-    if reg.version() < snapshot_id {
-        return ToolResult {
-            success: false,
-            output_json: String::new(),
-            error_message: "Invalid snapshot ID".into(),
-            duration_ms: 0,
-        };
-    }
 
     let tool_entry = reg
         .by_kind(ModuleKind::Tool)
@@ -60,6 +111,8 @@ pub async fn invoke(
 
     let result = tokio::time::timeout(timeout, async {
         let mut child = match tokio::process::Command::new(&path)
+            .env("SCARLLET_SESSION_ID", session_id)
+            .env("SCARLLET_AGENT_ID", agent_id)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

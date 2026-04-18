@@ -6,18 +6,15 @@ edition = "2021"
 [dependencies]
 scarllet-proto = { path = "../scarllet-proto" }
 scarllet-sdk = { path = "../scarllet-sdk" }
+clap = { version = "4", features = ["derive"] }
 tonic = "0.14"
 tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 crossterm = "0.29"
 tui-markdown = { version = "0.3", features = ["highlight-code"] }
 pulldown-cmark = "0.13"
 dirs = "6"
-chrono = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tracing = "0.1"
-uuid = { version = "1", features = ["v4"] }
 unicode-segmentation = "1.11"
 unicode-width = "0.1.14"
+serde_json = "1"

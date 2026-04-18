@@ -1,12 +1,18 @@
+//! Ratatui render pipeline.
+//!
+//! Walks the local node-graph mirror once per frame and paints the
+//! chat pane, input box, and status bar. Rendering is read-only —
+//! interactive state transitions happen in [`crate::events`].
+
 use ratatui::layout::{Alignment, Constraint, Layout};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 use ratatui::Frame;
 
-use crate::app::{App, Focus, Route};
+use crate::app::{App, Focus, Route, SessionStatus};
 
 /// Top-level render dispatcher — draws the screen for the current route.
 pub(crate) fn routes(frame: &mut Frame, app: &mut App) {
@@ -55,13 +61,17 @@ fn compute_input_height(app: &crate::input::InputState, available_width: u16, ma
 /// Lays out and draws the chat screen: history, input, and status bar.
 fn draw_chat(frame: &mut Frame, app: &mut App) {
     let total_height = frame.area().height;
-    let max_input_lines = (total_height as u32 * 30 / 100).max(1) as u16; // 30% of screen as per spec
+    let max_input_lines = (total_height as u32 * 30 / 100).max(1) as u16;
     let input_inner_width = frame.area().width.saturating_sub(2 + 1);
     let input_lines = compute_input_height(&app.input_state, input_inner_width, max_input_lines);
 
-    let [history_area, _, input_area, _, status_area] = Layout::vertical([
+    let paused = app.session_status == SessionStatus::Paused;
+    let paused_hint_rows: u16 = if paused { 1 } else { 0 };
+
+    let [history_area, _, hint_area, input_area, _, status_area] = Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(1),
+        Constraint::Length(paused_hint_rows),
         Constraint::Length(input_lines),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -69,19 +79,36 @@ fn draw_chat(frame: &mut Frame, app: &mut App) {
     .areas(frame.area());
 
     draw_history(frame, app, history_area);
+    if paused {
+        draw_paused_hint(frame, hint_area);
+    }
     draw_input(frame, app, input_area);
     draw_status_bar(frame, app, status_area);
+}
+
+/// Renders the "Press Esc to resume" banner shown above the input while
+/// the session is in `SessionStatus::Paused`. Typing remains functional
+/// (B.4: prompts enqueue under Paused but do not dispatch until the user
+/// presses Esc to recover).
+fn draw_paused_hint(frame: &mut Frame, area: ratatui::layout::Rect) {
+    let hint = Paragraph::new(Line::styled(
+        "  Press Esc to resume",
+        Style::default()
+            .fg(Color::LightRed)
+            .add_modifier(Modifier::BOLD),
+    ));
+    frame.render_widget(hint, area);
 }
 
 /// Renders the scrollable chat message history with auto-follow and scrollbar.
 fn draw_history(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let block = Block::default();
-
     let inner = block.inner(area);
     frame.render_widget(block, area);
     app.history_viewport_height = inner.height;
 
-    if app.messages.is_empty() {
+    let top_level: Vec<scarllet_proto::proto::Node> = app.top_level_nodes().cloned().collect();
+    if top_level.is_empty() {
         let welcome = Paragraph::new(vec![
             Line::raw(""),
             Line::styled(
@@ -94,17 +121,44 @@ fn draw_history(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     }
 
     use crate::widgets::ScrollItem;
-    let msg_widgets: Vec<crate::widgets::ChatMessageWidget> = app
-        .messages
+
+    let descendants_per_node: Vec<Vec<scarllet_proto::proto::Node>> = top_level
         .iter()
+        .map(|n| app.descendants_of(&n.id).into_iter().cloned().collect())
+        .collect();
+    let expanded_tools = app.expanded_tools.clone();
+
+    let debug_enabled = app.debug_enabled;
+    let tick = app.tick;
+    // Snapshot the reveal map up front so we don't borrow `app` again
+    // inside the widget builder loop.
+    let reveal_budgets: Vec<Option<usize>> = top_level
+        .iter()
+        .map(|n| {
+            let is_agent = n.kind == scarllet_proto::proto::NodeKind::Agent as i32;
+            if is_agent {
+                Some(app.reveal_for(&n.id).visible_chars)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let msg_widgets: Vec<crate::widgets::ChatMessageWidget> = top_level
+        .iter()
+        .zip(descendants_per_node.iter())
+        .zip(reveal_budgets.iter())
         .enumerate()
-        .map(|(i, entry)| {
+        .map(|(i, ((node, descendants), budget))| {
+            let descendant_refs: Vec<&scarllet_proto::proto::Node> = descendants.iter().collect();
             crate::widgets::ChatMessageWidget::new(
-                entry,
+                node,
+                &descendant_refs,
+                &expanded_tools,
                 app.focused_message_idx == Some(i),
-                &app.tool_calls,
-                app.tick,
                 inner.width,
+                debug_enabled,
+                *budget,
+                tick,
             )
         })
         .collect();
@@ -160,7 +214,6 @@ fn draw_history(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
 /// Renders the multi-line input editor with cursor, selection highlights, and scrollbar.
 fn draw_input(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let block = Block::default().padding(Padding::left(1));
-
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -200,7 +253,7 @@ fn draw_input(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let mut display_lines: Vec<Line> = Vec::new();
     let sel_range = app.input_state.selection_range();
 
-    for (_, vl) in visual_lines[start..end].iter().enumerate() {
+    for vl in &visual_lines[start..end] {
         let line_text = &app.input_state.text()[vl.byte_start..vl.byte_end];
 
         if let Some((sel_start, sel_end)) = sel_range {
@@ -260,147 +313,251 @@ fn format_git_segment(info: &crate::git_info::GitInfo) -> String {
     info.short_sha.clone()
 }
 
-/// Formats a number with `k` suffix for thousands (e.g. `12.5k`).
-fn format_compact(n: u32) -> String {
-    if n < 1_000 {
-        return format!("{n}");
+/// Picks the lifecycle label + color shown in the status bar.
+///
+/// Priority (per effort 06):
+/// - `PAUSED` (red) overrides everything else while the session is paused.
+/// - Otherwise, `READY` when no agent is running and the queue is empty.
+/// - `THINKING` when a main agent is streaming and the queue is empty.
+/// - `THINKING +N queued` when a turn is active with queued follow-ups.
+/// - `+N queued` when nothing is running but prompts have been enqueued
+///   (transient — normally the next turn dispatches immediately).
+fn lifecycle_segment(app: &App) -> (String, Style) {
+    if app.session_status == SessionStatus::Paused {
+        return (
+            "PAUSED".to_string(),
+            Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+        );
     }
-    let k = n as f64 / 1_000.0;
-    let decimal = (k.fract() * 10.0).round() as u32;
-    if decimal == 0 {
-        format!("{}k", k as u32)
-    } else {
-        format!("{:.1}k", k)
-    }
-}
-
-/// Builds the `"used / limit tokens (pct%)"` string for the status bar.
-fn format_token_budget(total: u32, window: u32) -> String {
-    if window == 0 {
-        return String::new();
-    }
-    let pct = (total as f64 / window as f64 * 100.0).round() as u32;
-    format!(
-        "{} / {} tokens ({}%)",
-        format_compact(total),
-        format_compact(window),
-        pct
-    )
-}
-
-/// Returns a color style that reflects context-window pressure (green → yellow → red).
-fn token_budget_style(total: u32, window: u32) -> Style {
-    if window == 0 {
-        return Style::default().fg(Color::DarkGray);
-    }
-    let pct = (total as f64 / window as f64 * 100.0).round() as u32;
-    if pct >= 95 {
-        Style::default().fg(Color::LightRed)
-    } else if pct >= 75 {
+    let streaming = app.is_streaming();
+    let queued = app.queue_len;
+    let label = match (streaming, queued) {
+        (false, 0) => "READY".to_string(),
+        (true, 0) => "THINKING".to_string(),
+        (true, n) => format!("THINKING  +{n} queued"),
+        (false, n) => format!("+{n} queued"),
+    };
+    let style = if streaming {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::DarkGray)
-    }
+    };
+    (label, style)
 }
 
-/// Renders the bottom status bar with cwd, git info, token budget, and provider/model.
+/// Renders the bottom status bar with cwd, git info, lifecycle label,
+/// optional token counter, provider snapshot, and session id.
+///
+/// Segment priority on narrow terminals (drop-first → kept-longest):
+/// `provider` → `tokens` → `session` → `lifecycle`. Lifecycle stays even
+/// at tiny widths so a PAUSED indicator never disappears.
 fn draw_status_bar(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let style = Style::default().fg(Color::DarkGray);
+    let muted = Style::default().fg(Color::DarkGray);
     let sep = "  │  ";
     let width = area.width as usize;
 
     let left_cwd = format!(" {}", app.cwd_display);
     let left_git = app.git_info.as_ref().map(format_git_segment);
 
-    let right_provider: Option<String> = if app.provider_name.is_empty() {
-        None
-    } else {
-        Some(app.provider_name.clone())
-    };
-    let right_model: Option<String> = if app.model.is_empty() {
-        None
-    } else if app.reasoning_effort.is_empty() {
-        Some(app.model.clone())
-    } else {
-        Some(format!("{} · {}", app.model, app.reasoning_effort))
-    };
-
-    let mut right_parts: Vec<String> = Vec::new();
-    if let Some(ref prov) = right_provider {
-        right_parts.push(prov.clone());
-        if let Some(ref model) = right_model {
-            right_parts.push(sep.to_string());
-            right_parts.push(model.clone());
+    let session_segment = match app.session_id.as_ref() {
+        Some(id) => {
+            let short = &id[..8.min(id.len())];
+            format!("session {short}")
         }
-    }
+        None => "no session".to_string(),
+    };
 
-    let right_str: String = right_parts.concat();
+    let (lifecycle_text, lifecycle_style) = lifecycle_segment(app);
+    let token_segment = app
+        .latest_token_usage()
+        .map(|(total, window)| format!("tokens: {total}/{window}"));
+    let provider_segment = app
+        .provider_info
+        .as_ref()
+        .and_then(|p| p.display_label());
+
     let left_git_str = left_git
         .as_ref()
         .map(|g| format!("{sep}{g}"))
         .unwrap_or_default();
     let left_full = format!("{left_cwd}{left_git_str}");
 
-    let center_str = format_token_budget(app.total_tokens, app.context_window);
-    let center_style = token_budget_style(app.total_tokens, app.context_window);
-
     let gap = 2usize;
+    let layout = pick_right_layout(
+        &left_full,
+        &left_cwd,
+        provider_segment.as_deref(),
+        token_segment.as_deref(),
+        &lifecycle_text,
+        &session_segment,
+        sep,
+        width,
+        gap,
+    );
 
-    let (left_out, right_out) =
-        if !right_str.is_empty() && left_full.len() + gap + right_str.len() <= width {
-            (left_full, right_str)
-        } else if right_provider.is_some()
-            && left_full.len() + gap + right_provider.as_ref().unwrap().len() <= width
-        {
-            (left_full, right_provider.unwrap())
-        } else if left_full.len() <= width {
-            (left_full, String::new())
-        } else if left_cwd.len() <= width {
-            (left_cwd.clone(), String::new())
-        } else {
-            let max = width.saturating_sub(1);
-            let truncated: String = left_cwd.chars().take(max).collect();
-            (format!("{truncated}…"), String::new())
-        };
+    let left_len = layout.left_out.chars().count();
+    let mut spans: Vec<Span> = vec![Span::styled(layout.left_out.clone(), muted)];
+    let right_len = layout.right_len();
 
-    let left_len = left_out.chars().count();
-    let right_len = right_out.chars().count();
-    let center_len = center_str.chars().count();
-
-    let mut spans: Vec<Span> = vec![Span::styled(left_out, style)];
-
-    let fits_all_three =
-        !center_str.is_empty() && left_len + gap + center_len + gap + right_len <= width;
-
-    if fits_all_three && !right_out.is_empty() {
-        let total_content = left_len + center_len + right_len;
-        let remaining = width.saturating_sub(total_content);
-        let left_pad = remaining / 2;
-        let right_pad = remaining - left_pad;
-
-        spans.push(Span::raw(" ".repeat(left_pad)));
-        spans.push(Span::styled(center_str, center_style));
-        spans.push(Span::raw(" ".repeat(right_pad)));
-        spans.push(Span::styled(right_out, style));
-    } else if fits_all_three {
-        let remaining = width.saturating_sub(left_len + center_len);
-        let left_pad = remaining / 2;
-
-        spans.push(Span::raw(" ".repeat(left_pad)));
-        spans.push(Span::styled(center_str, center_style));
-    } else if !center_str.is_empty() && left_len + gap + center_len <= width && right_out.is_empty()
-    {
-        let remaining = width.saturating_sub(left_len + center_len);
-        let left_pad = remaining / 2;
-
-        spans.push(Span::raw(" ".repeat(left_pad)));
-        spans.push(Span::styled(center_str, center_style));
-    } else if !right_out.is_empty() && left_len + right_len < width {
+    if layout.has_right() && left_len + right_len <= width {
         let padding = width.saturating_sub(left_len + right_len);
         spans.push(Span::raw(" ".repeat(padding)));
-        spans.push(Span::styled(right_out, style));
+        if layout.show_tokens {
+            if let Some(tokens) = token_segment.as_ref() {
+                spans.push(Span::styled(tokens.clone(), muted));
+                spans.push(Span::styled(sep.to_string(), muted));
+            }
+        }
+        if layout.show_provider {
+            if let Some(provider) = provider_segment.as_ref() {
+                spans.push(Span::styled(provider.clone(), muted));
+                spans.push(Span::styled(sep.to_string(), muted));
+            }
+        }
+        spans.push(Span::styled(lifecycle_text.clone(), lifecycle_style));
+        if layout.show_session {
+            spans.push(Span::styled(format!("{sep}{session_segment}"), muted));
+        }
     }
 
     let bar = Paragraph::new(Line::from(spans));
     frame.render_widget(bar, area);
 }
+
+/// Resolved layout decision from [`pick_right_layout`]. Each flag gates
+/// exactly one right-hand segment; `left_out` is the already-truncated
+/// left slab, and `right_plain_len` is the ready-to-measure right slab
+/// length (in chars) used to compute the centre padding.
+struct StatusBarLayout {
+    left_out: String,
+    show_provider: bool,
+    show_tokens: bool,
+    show_session: bool,
+    has_lifecycle: bool,
+    right_plain_len: usize,
+}
+
+impl StatusBarLayout {
+    fn has_right(&self) -> bool {
+        self.has_lifecycle
+    }
+
+    fn right_len(&self) -> usize {
+        self.right_plain_len
+    }
+}
+
+/// Pure layout decision for [`draw_status_bar`]. Tests can pin the
+/// degradation cascade without instantiating a `Frame`. The algorithm
+/// starts from the richest layout and strips segments in ascending
+/// priority — provider first, then tokens, then session — always keeping
+/// the lifecycle label so `PAUSED` / `THINKING` remain visible at every
+/// width.
+#[allow(clippy::too_many_arguments)]
+fn pick_right_layout(
+    left_full: &str,
+    left_cwd: &str,
+    provider: Option<&str>,
+    tokens: Option<&str>,
+    lifecycle: &str,
+    session: &str,
+    sep: &str,
+    width: usize,
+    gap: usize,
+) -> StatusBarLayout {
+    let compose = |show_provider: bool, show_tokens: bool, show_session: bool| -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if show_tokens {
+            if let Some(t) = tokens {
+                parts.push(t.to_string());
+            }
+        }
+        if show_provider {
+            if let Some(p) = provider {
+                parts.push(p.to_string());
+            }
+        }
+        parts.push(lifecycle.to_string());
+        if show_session {
+            parts.push(session.to_string());
+        }
+        parts.join(sep)
+    };
+
+    let left_len = left_full.chars().count();
+    let left_cwd_len = left_cwd.chars().count();
+
+    let variants: [(bool, bool, bool); 4] = [
+        (true, true, true),
+        (false, true, true),
+        (false, false, true),
+        (false, false, false),
+    ];
+
+    for (show_provider, show_tokens, show_session) in variants {
+        let want_provider = show_provider && provider.is_some();
+        let want_tokens = show_tokens && tokens.is_some();
+        let right = compose(want_provider, want_tokens, show_session);
+        let right_len = right.chars().count();
+        if left_len + gap + right_len <= width {
+            return StatusBarLayout {
+                left_out: left_full.to_string(),
+                show_provider: want_provider,
+                show_tokens: want_tokens,
+                show_session,
+                has_lifecycle: true,
+                right_plain_len: right_len,
+            };
+        }
+    }
+
+    // Right column doesn't fit alongside the full left — fall back to
+    // showing lifecycle only (possibly stripping the left column too).
+    if lifecycle.chars().count() + gap <= width {
+        return StatusBarLayout {
+            left_out: String::new(),
+            show_provider: false,
+            show_tokens: false,
+            show_session: false,
+            has_lifecycle: true,
+            right_plain_len: lifecycle.chars().count(),
+        };
+    }
+
+    // Nothing on the right fits; render whatever slice of the left we can.
+    if left_len <= width {
+        return StatusBarLayout {
+            left_out: left_full.to_string(),
+            show_provider: false,
+            show_tokens: false,
+            show_session: false,
+            has_lifecycle: false,
+            right_plain_len: 0,
+        };
+    }
+    if left_cwd_len <= width {
+        return StatusBarLayout {
+            left_out: left_cwd.to_string(),
+            show_provider: false,
+            show_tokens: false,
+            show_session: false,
+            has_lifecycle: false,
+            right_plain_len: 0,
+        };
+    }
+    let max = width.saturating_sub(1);
+    let truncated: String = left_cwd.chars().take(max).collect();
+    StatusBarLayout {
+        left_out: format!("{truncated}…"),
+        show_provider: false,
+        show_tokens: false,
+        show_session: false,
+        has_lifecycle: false,
+        right_plain_len: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests;

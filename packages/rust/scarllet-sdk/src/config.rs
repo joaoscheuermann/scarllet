@@ -4,16 +4,37 @@ use std::path::PathBuf;
 
 /// Top-level user configuration loaded from `config.json`.
 ///
-/// Holds the list of LLM providers the user has set up and which one is
-/// currently selected. Serialized with camelCase keys to match the JSON
-/// schema exposed to end-users.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+/// Holds the list of LLM providers the user has set up, which one is
+/// currently selected, and the name of the agent module spawned by default
+/// when a session needs a main agent. Serialized with camelCase keys to
+/// match the JSON schema exposed to end-users.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScarlletConfig {
     #[serde(default)]
     pub provider: String,
     #[serde(default)]
     pub providers: Vec<Provider>,
+    /// Name of the agent module spawned for new turns (matches
+    /// `ModuleManifest::name` of an agent registered via the watcher).
+    #[serde(default = "default_agent_name")]
+    pub default_agent: String,
+}
+
+impl Default for ScarlletConfig {
+    /// Defaults to no providers and the canonical `"default"` agent module.
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            providers: Vec::new(),
+            default_agent: default_agent_name(),
+        }
+    }
+}
+
+/// Returns the canonical name of the bundled default agent module.
+fn default_agent_name() -> String {
+    "default".to_string()
 }
 
 /// Discriminator for the LLM API dialect a [`Provider`] speaks.
@@ -136,166 +157,4 @@ pub fn save(config: &ScarlletConfig) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn roundtrip_openai() {
-        let config = ScarlletConfig {
-            provider: "openrouter".into(),
-            providers: vec![Provider {
-                name: "openrouter".into(),
-                provider_type: ProviderType::Openai,
-                api_key: "sk-test".into(),
-                api_url: Some("https://openrouter.ai/api/v1".into()),
-                model: "gpt-4o".into(),
-                models: vec![
-                    ModelConfig {
-                        id: "gpt-4o".into(),
-                        reasoning: None,
-                    },
-                    ModelConfig {
-                        id: "o3-mini".into(),
-                        reasoning: Some("high".into()),
-                    },
-                ],
-            }],
-        };
-        let json = serde_json::to_string(&config).unwrap();
-        let loaded: ScarlletConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.provider, "openrouter");
-        assert_eq!(loaded.providers[0].api_key, "sk-test");
-        assert_eq!(loaded.providers[0].model, "gpt-4o");
-        assert_eq!(loaded.providers[0].provider_type, ProviderType::Openai);
-    }
-
-    #[test]
-    fn roundtrip_gemini() {
-        let config = ScarlletConfig {
-            provider: "my-gemini".into(),
-            providers: vec![Provider {
-                name: "my-gemini".into(),
-                provider_type: ProviderType::Gemini,
-                api_key: "AIza-test".into(),
-                api_url: None,
-                model: "gemini-3.1-pro-preview".into(),
-                models: vec![ModelConfig {
-                    id: "gemini-3.1-pro-preview".into(),
-                    reasoning: Some("high".into()),
-                }],
-            }],
-        };
-        let json = serde_json::to_string(&config).unwrap();
-        let loaded: ScarlletConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.provider, "my-gemini");
-        assert_eq!(loaded.providers[0].provider_type, ProviderType::Gemini);
-        assert!(loaded.providers[0].api_url.is_none());
-        assert_eq!(
-            loaded.providers[0].reasoning_effort(),
-            Some("high")
-        );
-    }
-
-    #[test]
-    fn empty_default() {
-        let config = ScarlletConfig::default();
-        assert!(config.provider.is_empty());
-        assert!(config.providers.is_empty());
-    }
-
-    #[test]
-    fn active_provider_found() {
-        let config = ScarlletConfig {
-            provider: "local".into(),
-            providers: vec![Provider {
-                name: "local".into(),
-                provider_type: ProviderType::Openai,
-                api_key: String::new(),
-                api_url: Some("http://localhost:11434/v1".into()),
-                model: "llama3".into(),
-                models: vec![ModelConfig {
-                    id: "llama3".into(),
-                    reasoning: None,
-                }],
-            }],
-        };
-        let p = config.active_provider().unwrap();
-        assert_eq!(p.name, "local");
-        assert_eq!(p.model, "llama3");
-    }
-
-    #[test]
-    fn active_provider_empty_name() {
-        let config = ScarlletConfig::default();
-        assert!(config.active_provider().is_none());
-    }
-
-    #[test]
-    fn active_provider_not_in_list() {
-        let config = ScarlletConfig {
-            provider: "missing".into(),
-            providers: vec![],
-        };
-        assert!(config.active_provider().is_none());
-    }
-
-    #[test]
-    fn deserialize_missing_fields_uses_defaults() {
-        let json = r#"{}"#;
-        let config: ScarlletConfig = serde_json::from_str(json).unwrap();
-        assert!(config.provider.is_empty());
-        assert!(config.providers.is_empty());
-    }
-
-    #[test]
-    fn model_config_reasoning_lookup() {
-        let provider = Provider {
-            name: "test".into(),
-            provider_type: ProviderType::Gemini,
-            api_key: "key".into(),
-            api_url: None,
-            model: "gemini-pro".into(),
-            models: vec![
-                ModelConfig {
-                    id: "gemini-pro".into(),
-                    reasoning: Some("medium".into()),
-                },
-                ModelConfig {
-                    id: "gemini-flash".into(),
-                    reasoning: None,
-                },
-            ],
-        };
-        assert_eq!(provider.reasoning_effort(), Some("medium"));
-        assert_eq!(provider.active_model_config().unwrap().id, "gemini-pro");
-    }
-
-    #[test]
-    fn deserialize_from_json_example() {
-        let json = r#"{
-            "provider": "gemini",
-            "providers": [
-                {
-                    "name": "gemini",
-                    "type": "gemini",
-                    "apiKey": "AIzaSy-test",
-                    "model": "gemini-3.1-pro-preview",
-                    "models": [
-                        {
-                            "id": "gemini-3.1-pro-preview",
-                            "reasoning": "high"
-                        }
-                    ]
-                }
-            ]
-        }"#;
-        let config: ScarlletConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.provider, "gemini");
-        let p = config.active_provider().unwrap();
-        assert_eq!(p.provider_type, ProviderType::Gemini);
-        assert_eq!(p.api_key, "AIzaSy-test");
-        assert!(p.api_url.is_none());
-        assert_eq!(p.model, "gemini-3.1-pro-preview");
-        assert_eq!(p.reasoning_effort(), Some("high"));
-    }
-}
+mod tests;

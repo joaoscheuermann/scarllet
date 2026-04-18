@@ -2,33 +2,317 @@ syntax = "proto3";
 
 package scarllet;
 
+// =============================================================================
+// Orchestrator service
+// =============================================================================
+
 service Orchestrator {
-  rpc GetToolRegistry(ToolRegistryQuery) returns (ToolRegistryResponse);
-  rpc GetActiveProvider(ActiveProviderQuery) returns (ActiveProviderResponse);
-  rpc InvokeTool(ToolInvocation) returns (ToolResult);
-  rpc AttachTui(stream TuiMessage) returns (stream CoreEvent);
-  rpc AgentStream(stream AgentMessage) returns (stream AgentInstruction);
-  rpc EmitDebugLog(DebugLogRequest) returns (Ack);
+  // Session lifecycle (unary)
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc DestroySession(DestroySessionRequest) returns (DestroySessionResponse);
+  rpc GetSessionState(GetSessionStateRequest) returns (SessionState);
+
+  // TUI-facing
+  rpc AttachSession(AttachSessionRequest) returns (stream SessionDiff);
+  rpc SendPrompt(SendPromptRequest) returns (SendPromptResponse);
+  rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
+
+  // Agent-facing bidi stream
+  rpc AgentStream(stream AgentOutbound) returns (stream AgentInbound);
+
+  // Session-scoped per-turn unary RPCs
+  rpc GetActiveProvider(GetActiveProviderRequest) returns (ActiveProviderResponse);
+  rpc GetToolRegistry(GetToolRegistryRequest) returns (GetToolRegistryResponse);
+  rpc GetConversationHistory(GetConversationHistoryRequest) returns (ConversationHistoryResponse);
+  rpc InvokeTool(InvokeToolRequest) returns (InvokeToolResponse);
 }
 
-message Ack {}
+// =============================================================================
+// Node model
+// =============================================================================
 
-message DebugLogRequest {
+enum NodeKind {
+  NODE_KIND_UNSPECIFIED = 0;
+  USER = 1;
+  AGENT = 2;
+  THOUGHT = 3;
+  TOOL = 4;
+  RESULT = 5;
+  DEBUG = 6;
+  TOKEN_USAGE = 7;
+  ERROR = 8;
+}
+
+message Node {
+  string id = 1;
+  optional string parent_id = 2;
+  NodeKind kind = 3;
+  uint64 created_at = 4;
+  uint64 updated_at = 5;
+  oneof payload {
+    UserPayload user = 10;
+    AgentPayload agent = 11;
+    ThoughtPayload thought = 12;
+    ToolPayload tool = 13;
+    ResultPayload result = 14;
+    DebugPayload debug = 15;
+    TokenUsagePayload token_usage = 16;
+    ErrorPayload error = 17;
+  }
+}
+
+message UserPayload {
+  string text = 1;
+  string working_directory = 2;
+}
+
+message AgentPayload {
+  string agent_module = 1;
+  string agent_id = 2;
+  // running | finished | failed
+  string status = 3;
+}
+
+message ThoughtPayload {
+  string content = 1;
+}
+
+message ToolPayload {
+  string tool_name = 1;
+  string arguments_preview = 2;
+  string arguments_json = 3;
+  // pending | running | done | failed
+  string status = 4;
+  uint64 duration_ms = 5;
+  string result_json = 6;
+}
+
+message ResultPayload {
+  string content = 1;
+  string finish_reason = 2;
+}
+
+message DebugPayload {
   string source = 1;
   string level = 2;
   string message = 3;
 }
 
-message ToolRegistryQuery {}
-message ToolRegistryResponse { repeated ToolInfo tools = 1; }
-message ToolInfo {
-  string name = 1;
-  string description = 2;
-  string input_schema_json = 3;
-  uint64 timeout_ms = 4;
+message TokenUsagePayload {
+  uint32 total_tokens = 1;
+  uint32 context_window = 2;
 }
 
-message ActiveProviderQuery {}
+message ErrorPayload {
+  string source = 1;
+  string message = 2;
+}
+
+// Partial-update patch for Node fields. Absent fields are unchanged.
+// `thought_content` and `result_content` use APPEND semantics (server
+// concatenates the delta). All other fields use REPLACE semantics.
+message NodePatch {
+  optional string agent_status = 1;
+  optional string thought_content = 2;
+  optional string tool_status = 3;
+  optional uint64 tool_duration_ms = 4;
+  optional string tool_result_json = 5;
+  optional string result_content = 6;
+  optional string result_finish_reason = 7;
+  optional string error_message = 8;
+  optional uint32 token_total = 9;
+  optional uint32 token_window = 10;
+}
+
+// =============================================================================
+// Session lifecycle (unary)
+// =============================================================================
+
+message CreateSessionRequest {}
+message CreateSessionResponse {
+  string session_id = 1;
+}
+
+message ListSessionsRequest {}
+message ListSessionsResponse {
+  repeated SessionSummary sessions = 1;
+}
+
+message SessionSummary {
+  string session_id = 1;
+  uint64 created_at = 2;
+  uint64 last_activity = 3;
+  string main_agent_module = 4;
+}
+
+message DestroySessionRequest {
+  string session_id = 1;
+}
+message DestroySessionResponse {}
+
+message GetSessionStateRequest {
+  string session_id = 1;
+}
+
+message SessionState {
+  string session_id = 1;
+  // RUNNING | PAUSED
+  string status = 2;
+  ActiveProviderResponse provider = 3;
+  repeated QueuedPrompt queue = 4;
+  repeated Node nodes = 5;
+  repeated AgentSummary agents = 6;
+  uint64 created_at = 7;
+  uint64 last_activity = 8;
+}
+
+message AgentSummary {
+  string agent_id = 1;
+  string agent_module = 2;
+  string parent_id = 3;
+  string agent_node_id = 4;
+}
+
+message QueuedPrompt {
+  string prompt_id = 1;
+  string text = 2;
+  string working_directory = 3;
+  string user_node_id = 4;
+}
+
+// =============================================================================
+// TUI-facing streaming + commands
+// =============================================================================
+
+message AttachSessionRequest {
+  // Empty = create a new session implicitly.
+  optional string session_id = 1;
+}
+
+message SessionDiff {
+  oneof payload {
+    Attached attached = 1;
+    NodeCreated node_created = 2;
+    NodeUpdated node_updated = 3;
+    QueueChanged queue_changed = 4;
+    AgentRegistered agent_registered = 5;
+    AgentUnregistered agent_unregistered = 6;
+    StatusChanged status_changed = 7;
+    SessionDestroyed destroyed = 8;
+  }
+}
+
+message Attached {
+  SessionState state = 1;
+}
+message NodeCreated {
+  Node node = 1;
+}
+message NodeUpdated {
+  string node_id = 1;
+  NodePatch patch = 2;
+  uint64 updated_at = 3;
+}
+message QueueChanged {
+  repeated QueuedPrompt queued = 1;
+}
+message AgentRegistered {
+  string agent_id = 1;
+  string agent_module = 2;
+  string parent_id = 3;
+  string agent_node_id = 4;
+}
+message AgentUnregistered {
+  string agent_id = 1;
+}
+message StatusChanged {
+  // RUNNING | PAUSED
+  string status = 1;
+}
+message SessionDestroyed {
+  string session_id = 1;
+}
+
+message SendPromptRequest {
+  string session_id = 1;
+  string text = 2;
+  string working_directory = 3;
+}
+message SendPromptResponse {
+  string user_node_id = 1;
+}
+
+message StopSessionRequest {
+  string session_id = 1;
+}
+message StopSessionResponse {}
+
+// =============================================================================
+// Agent-facing bidi stream
+// =============================================================================
+
+message AgentOutbound {
+  oneof payload {
+    AgentRegister register = 1;
+    CreateNode create_node = 2;
+    UpdateNode update_node = 3;
+    TurnFinished turn_finished = 4;
+    AgentFailure failure = 5;
+  }
+}
+
+message AgentRegister {
+  // Session this agent belongs to (passed via SCARLLET_SESSION_ID).
+  string session_id = 1;
+  // Core-assigned id for this specific agent process (SCARLLET_AGENT_ID).
+  string agent_id = 2;
+  // Manifest name of the agent module (SCARLLET_AGENT_MODULE).
+  string agent_module = 3;
+  // session_id for main agents; calling agent_id for sub-agents
+  // (SCARLLET_PARENT_ID).
+  string parent_id = 4;
+}
+
+message CreateNode {
+  Node node = 1;
+}
+message UpdateNode {
+  string node_id = 1;
+  NodePatch patch = 2;
+}
+message TurnFinished {
+  string finish_reason = 1;
+}
+message AgentFailure {
+  string message = 1;
+}
+
+message AgentInbound {
+  oneof payload {
+    AgentTask task = 1;
+    CancelNow cancel = 2;
+  }
+}
+
+message AgentTask {
+  string session_id = 1;
+  string agent_id = 2;
+  string parent_id = 3;
+  string prompt = 4;
+  string working_directory = 5;
+}
+
+message CancelNow {}
+
+// =============================================================================
+// Session-scoped per-turn unary RPCs
+// =============================================================================
+
+message GetActiveProviderRequest {
+  string session_id = 1;
+}
+
 message ActiveProviderResponse {
   bool configured = 1;
   string provider_name = 2;
@@ -39,162 +323,59 @@ message ActiveProviderResponse {
   string reasoning_effort = 7;
 }
 
-message ToolInvocation {
-  string tool_name = 1;
-  string input_json = 2;
-  uint64 snapshot_id = 3;
+message GetToolRegistryRequest {
+  string session_id = 1;
 }
-message ToolResult {
+
+message GetToolRegistryResponse {
+  repeated ToolInfo tools = 1;
+}
+
+message ToolInfo {
+  string name = 1;
+  string description = 2;
+  string input_schema_json = 3;
+  uint64 timeout_ms = 4;
+}
+
+message GetConversationHistoryRequest {
+  string session_id = 1;
+}
+
+message ConversationHistoryResponse {
+  repeated HistoryEntry messages = 1;
+}
+
+// One LLM-formatted chat-history entry derived from the session node graph.
+//
+// `role` is one of `user`, `assistant`, `tool`, or `system`. The optional
+// fields carry the tool-calling extensions the LLM provider clients expect:
+//
+// - `tool_call_id` is set when `role == "tool"` (matches an earlier
+//   assistant tool call) so the SDK can populate
+//   `ChatMessage::tool_call_id` directly.
+// - `tool_calls_json` is set when `role == "assistant"` and the assistant
+//   turn issued one or more tool calls before producing its result. The
+//   value is a JSON array of `[{ id, type: "function",
+//   function: { name, arguments } }]` shaped objects so it can be parsed
+//   straight into `Vec<scarllet_llm::types::ToolCall>` in the SDK adapter.
+message HistoryEntry {
+  string role = 1;
+  string content = 2;
+  optional string tool_call_id = 3;
+  optional string tool_calls_json = 4;
+}
+
+message InvokeToolRequest {
+  string session_id = 1;
+  string agent_id = 2;
+  string tool_name = 3;
+  string input_json = 4;
+}
+
+message InvokeToolResponse {
   bool success = 1;
   string output_json = 2;
   string error_message = 3;
   uint64 duration_ms = 4;
-}
-
-// Bidirectional TUI streaming
-
-message TuiMessage {
-  oneof payload {
-    PromptMessage prompt = 1;
-    CancelPrompt cancel = 2;
-    HistorySync history_sync = 3;
-  }
-}
-
-message CancelPrompt {
-  string task_id = 1;
-}
-
-message PromptMessage {
-  string text = 1;
-  string working_directory = 2;
-}
-
-message CoreEvent {
-  oneof payload {
-    ConnectedEvent connected = 1;
-    AgentStartedEvent agent_started = 2;
-    AgentThinkingEvent agent_thinking = 3;
-    AgentResponseEvent agent_response = 4;
-    AgentErrorEvent agent_error = 5;
-    SystemEvent system = 6;
-    ProviderInfoEvent provider_info = 7;
-    AgentToolCallEvent agent_tool_call = 8;
-    DebugLogEvent debug_log = 9;
-    TokenUsageEvent token_usage = 10;
-  }
-}
-
-message TokenUsageEvent {
-  uint32 total_tokens = 1;
-  uint32 context_window = 2;
-}
-
-message DebugLogEvent {
-  string source = 1;
-  string level = 2;
-  string message = 3;
-  uint64 timestamp_ms = 4;
-}
-
-message AgentToolCallEvent {
-  string task_id = 1;
-  string agent_name = 2;
-  string call_id = 3;
-  string tool_name = 4;
-  string arguments_preview = 5;
-  string status = 6;
-  uint64 duration_ms = 7;
-  string result = 8;
-}
-
-message ConnectedEvent { uint64 uptime_secs = 1; }
-message AgentStartedEvent { string task_id = 1; string agent_name = 2; }
-message AgentBlock {
-  string block_type = 1;
-  string content = 2;
-}
-
-message AgentThinkingEvent {
-  string task_id = 1;
-  string agent_name = 2;
-  repeated AgentBlock blocks = 3;
-}
-message AgentResponseEvent {
-  string task_id = 1;
-  string agent_name = 2;
-  repeated AgentBlock blocks = 3;
-}
-message AgentErrorEvent { string task_id = 1; string agent_name = 2; string error = 3; }
-message SystemEvent { string message = 1; }
-message ProviderInfoEvent {
-  string provider_name = 1;
-  string model = 2;
-  string reasoning_effort = 3;
-}
-
-// Bidirectional Agent streaming
-
-message AgentMessage {
-  oneof payload {
-    AgentRegister register = 1;
-    AgentProgressMsg progress = 2;
-    AgentResultMsg result = 3;
-    AgentFailure failure = 4;
-    AgentToolCallMsg tool_call = 5;
-    AgentTokenUsageMsg token_usage = 6;
-  }
-}
-
-message AgentTokenUsageMsg {
-  string task_id = 1;
-  uint32 total_tokens = 2;
-  uint32 context_window = 3;
-}
-
-message AgentToolCallMsg {
-  string task_id = 1;
-  string call_id = 2;
-  string tool_name = 3;
-  string arguments_preview = 4;
-  string status = 5;
-  uint64 duration_ms = 6;
-  string result = 7;
-}
-
-message AgentRegister { string agent_name = 1; }
-message AgentProgressMsg {
-  string task_id = 1;
-  repeated AgentBlock blocks = 2;
-}
-message AgentResultMsg {
-  string task_id = 1;
-  repeated AgentBlock blocks = 2;
-}
-message AgentFailure { string task_id = 1; string error = 2; }
-
-message AgentTask {
-  string task_id = 1;
-  string prompt = 2;
-  string working_directory = 3;
-}
-
-message HistoryEntry {
-  string role = 1;
-  string content = 2;
-}
-
-message HistorySync {
-  repeated HistoryEntry messages = 1;
-}
-
-message AgentHistorySync {
-  repeated HistoryEntry messages = 1;
-}
-
-message AgentInstruction {
-  oneof payload {
-    AgentTask task = 1;
-    AgentHistorySync history_sync = 2;
-  }
 }

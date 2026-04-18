@@ -133,8 +133,8 @@ fn filtered_sorted_entries(
         }
     }
 
-    dirs.sort_by(|a, b| case_insensitive_name(a).cmp(&case_insensitive_name(b)));
-    files.sort_by(|a, b| case_insensitive_name(a).cmp(&case_insensitive_name(b)));
+    dirs.sort_by_key(|a| case_insensitive_name(a));
+    files.sort_by_key(|a| case_insensitive_name(a));
 
     let mut result = Vec::with_capacity(dirs.len() + files.len());
     result.extend(dirs.into_iter().map(|d| (d, true)));

@@ -109,7 +109,7 @@ fn execute(input: FindInput) -> FindOutput {
             Err(_) => continue,
         };
 
-        if entry.file_type().map_or(true, |ft| ft.is_dir()) {
+        if entry.file_type().is_none_or(|ft| ft.is_dir()) {
             continue;
         }
 

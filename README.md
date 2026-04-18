@@ -32,7 +32,7 @@ flowchart TB
   end
 
   user(["User"]) --> tui
-  tui -- "gRPC\nAttachTui stream" --> core
+  tui -- "gRPC\nAttachSession diff stream" --> core
   core -- "spawn / AgentStream" --> agent
   agent -- "HTTP / SSE" --> llmAPI(["LLM API\n(OpenAI / Gemini)"])
 ```
@@ -41,28 +41,36 @@ flowchart TB
 | ---------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `scarllet-proto` | `packages/rust/scarllet-proto` | Protobuf definitions and `tonic` codegen for the `Orchestrator` gRPC service                                                                                                                      |
 | `scarllet-sdk`   | `packages/rust/scarllet-sdk`   | Shared types: config loading (`config.json`), module manifests, lockfile for core address discovery                                                                                               |
-| `scarllet-core`  | `packages/rust/scarllet-core`  | Orchestrator binary — gRPC server, module/agent registries, task manager, filesystem watcher for hot-reloading plugins                                                                            |
-| `scarllet-tui`   | `packages/rust/scarllet-tui`   | Terminal UI built with **ratatui + crossterm** — chat interface that streams agent responses with markdown rendering, shows git branch info in the status bar                                     |
+| `scarllet-core`  | `packages/rust/scarllet-core`  | Orchestrator binary — gRPC server, multi-session registry, per-session node graph / queue / agents, filesystem watcher for hot-reloading plugins                                                  |
+| `scarllet-tui`   | `packages/rust/scarllet-tui`   | Terminal UI built with **ratatui + crossterm** — chat interface that hydrates from `AttachSession` and applies diffs to a local node-graph mirror                                                 |
 | `scarllet-llm`   | `packages/rust/scarllet-llm`   | Standalone LLM client library exposing the `LlmProvider` async trait; ships with `OpenAiProvider` (OpenAI-compatible HTTP + SSE streaming) and `GeminiProvider` (Google Gemini via `gemini-rust`) |
-| `agents/default` | `packages/rust/agents/default` | Reference agent — connects to core via `AgentStream`, fetches provider config, streams LLM responses back                                                                                         |
+| `agents/default` | `packages/rust/agents/default` | Reference agent — uses `scarllet_sdk::agent::AgentSession` to register, fetch provider / history / tools, and emit node mutations back                                                            |
 | `tools/*`        | `packages/rust/tools/*`        | Six plugin tools: `edit`, `find`, `grep`, `terminal`, `tree`, `write` — each is a standalone binary invoked by core via stdin/stdout JSON                                                         |
 
 ### gRPC Service (`Orchestrator`)
 
 The `Orchestrator` service in `orchestrator.proto` defines these RPCs:
 
-| RPC                 | Direction            | Purpose                                                    |
-| ------------------- | -------------------- | ---------------------------------------------------------- |
-| `GetToolRegistry`   | unary                | Return all discovered tools                                |
-| `GetActiveProvider` | unary                | Return active LLM provider config                          |
-| `InvokeTool`        | unary                | Execute a tool by name with JSON input                     |
-| `EmitDebugLog`      | unary                | Agents emit structured debug logs                          |
-| `AttachTui`         | bidirectional stream | TUI sends prompts / receives `CoreEvent`s                  |
-| `AgentStream`       | bidirectional stream | Agent receives `AgentInstruction`s / sends `AgentMessage`s |
+| RPC                        | Direction            | Purpose                                                          |
+| -------------------------- | -------------------- | ---------------------------------------------------------------- |
+| `CreateSession`            | unary                | Allocate a new session and return its id                         |
+| `ListSessions`             | unary                | Enumerate active sessions                                        |
+| `DestroySession`           | unary                | Cancel agents and drop a session                                 |
+| `GetSessionState`          | unary                | Return a full snapshot of a session                              |
+| `AttachSession`            | server stream        | First message hydrates; subsequent messages are `SessionDiff`s   |
+| `SendPrompt`               | unary                | Append a `User` node, enqueue a prompt, trigger dispatch         |
+| `StopSession`              | unary                | Cascade cancel main + sub-agents and clear the queue             |
+| `AgentStream`              | bidirectional stream | Agent register / node create-and-update / turn-finished / failure |
+| `GetActiveProvider`        | unary                | Per-turn provider snapshot (session-scoped)                      |
+| `GetToolRegistry`          | unary                | Per-session tool list (external tools + `spawn_sub_agent`)       |
+| `GetConversationHistory`   | unary                | Chronological history derived from the session node graph        |
+| `InvokeTool`               | unary                | Execute a tool by name within a session; `spawn_sub_agent` is a core-internal branch |
 
-Task lifecycle (submit / cancel / progress / status) and slash-commands are
-handled in-band over `AttachTui` and `AgentStream`, so no dedicated unary RPCs
-are exposed for them.
+All conversation state lives in a per-session flat graph of typed `Node`s
+(`User`, `Agent`, `Thought`, `Tool`, `Result`, `Debug`, `TokenUsage`, `Error`).
+Clients hydrate once via `AttachSession` and receive incremental `SessionDiff`
+messages (`NodeCreated`, `NodeUpdated`, `QueueChanged`, `AgentRegistered`,
+`AgentUnregistered`, `StatusChanged`, `SessionDestroyed`) thereafter.
 
 ## Runtime Layout
 
@@ -89,7 +97,7 @@ release/
 
 Core loads its configuration from `<OS config dir>/scarllet/config.json` (e.g. `%APPDATA%/scarllet/config.json` on Windows). The file defines LLM providers — each with an API URL, API key, model list, and optional settings like reasoning effort or extra body parameters. One provider is marked as `active_provider`.
 
-If the file does not exist, core creates it with empty defaults. Core watches `config.json` for changes and hot-reloads it — any edits are picked up immediately and broadcast to all connected TUI sessions as a `ProviderInfo` event.
+If the file does not exist, core creates it with empty defaults. Core watches `config.json` for changes and hot-reloads it. Per AC-9.2 the reload only affects **new** sessions — existing sessions keep the provider snapshot they captured at create-time so long-running conversations are not disrupted.
 
 ### Lockfile (`core.lock`)
 
@@ -110,17 +118,17 @@ User directories are scanned after local ones, so user-placed modules can overri
 - **Plugin model** — Tools, commands, and agents are standalone executables discovered via `--manifest` JSON output. Core watches filesystem directories and hot-reloads new modules as they appear.
 - **Process isolation** — Agents and tools run as child processes. Core communicates with tools via stdin/stdout JSON and with agents via bidirectional gRPC streams (`AgentStream`).
 - **LLM abstraction** — The `LlmProvider` async trait in `scarllet-llm` decouples agent logic from any specific provider. Currently ships with `OpenAiProvider` (OpenAI-compatible HTTP + SSE) and `GeminiProvider` (Google Gemini), both selectable at runtime via `config.json`.
-- **Broadcast to UIs** — Core multiplexes events (agent started, thinking, streaming response, errors) to all attached TUI sessions via `AttachTui`, so multiple terminals can observe the same agent run.
-- **Event sourcing in core** — `scarllet-core` maintains an in-memory event log (`sessions.rs`) and streams state snapshots to connected TUIs for replay/resume.
+- **Broadcast to UIs** — Each session multiplexes `SessionDiff`s (node creates, node updates, queue changes, agent register/unregister, status changes) to every TUI attached via `AttachSession`, so multiple terminals can observe the same session in sync.
+- **Node graph in core** — `scarllet-core` maintains a per-session append-only flat node graph (`session/nodes.rs`) and streams diffs to connected TUIs. `GetSessionState` returns a full snapshot for on-demand hydration.
 
 ## How Agents Work
 
-1. Core watches `agents/` directories, probes each binary with `--manifest`, and registers it in the `AgentRegistry`.
-2. The user types a prompt in the TUI. The TUI sends it over the `AttachTui` gRPC bidirectional stream to core.
-3. Core selects an agent, creates a task, and broadcasts `AgentStarted` to all attached TUIs.
-4. Core delivers an `AgentTask` to the agent — either over an already-open `AgentStream` or by spawning the agent binary and waiting for it to connect.
-5. The agent calls `GetActiveProvider` to fetch LLM credentials and model settings, then uses `scarllet-llm` to stream the model response. It sends `Progress`, `Result`, or `Failure` messages back on the stream.
-6. Core maps those messages to `CoreEvent`s and streams them to every attached TUI for display.
+1. Core watches `agents/` directories, probes each binary with `--manifest`, and registers it in the global module registry.
+2. The user types a prompt in the TUI. The TUI calls `SendPrompt(session_id, text, cwd)`; core appends a `User` node, enqueues the prompt, and broadcasts `NodeCreated` + `QueueChanged` diffs to every attached TUI.
+3. If no main agent is running for the session, core spawns the configured `default_agent` module binary, creates the turn's `Agent` node, and hands out the queued prompt as an `AgentTask`.
+4. The agent process connects back via `AgentStream`, sends `Register { parent_id = session_id, … }`, then calls `GetActiveProvider(session_id)`, `GetToolRegistry(session_id)`, and `GetConversationHistory(session_id)` to set up the per-turn LLM request.
+5. The agent uses `scarllet-llm` to stream tokens. For each streamed block it emits `CreateNode(Thought)` + `UpdateNode(thought_content: delta)`; for tool calls it emits `CreateNode(Tool pending)`, calls `InvokeTool`, then `UpdateNode(tool_status / result_json)`. On completion it emits `CreateNode(Result)` + `TurnFinished`.
+6. Each accepted mutation turns into the matching `SessionDiff` payload (`NodeCreated` / `NodeUpdated`) broadcast to every attached TUI.
 
 ## Fast Prototyping
 

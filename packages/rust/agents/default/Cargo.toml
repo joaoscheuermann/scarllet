@@ -4,11 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-scarllet-proto = { path = "../../scarllet-proto" }
+scarllet-sdk = { path = "../../scarllet-sdk" }
 scarllet-llm = { path = "../../scarllet-llm" }
-tonic = "0.14"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

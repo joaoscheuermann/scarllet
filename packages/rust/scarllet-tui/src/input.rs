@@ -7,8 +7,6 @@ use unicode_width::UnicodeWidthStr;
 pub struct VisualLine {
     pub byte_start: usize,
     pub byte_end: usize,
-    #[allow(dead_code)]
-    pub visual_width: u16,
 }
 
 /// Editable text buffer with cursor, selection, wrapping, and scroll state.
@@ -40,12 +38,6 @@ impl InputState {
         self.cursor_byte_offset = self.text.len();
         self.selection_anchor = None;
         self.vertical_scroll = 0;
-    }
-
-    /// Returns the cursor position as a byte offset.
-    #[allow(dead_code)]
-    pub fn cursor_byte_offset(&self) -> usize {
-        self.cursor_byte_offset
     }
 
     /// Returns the byte range of the current selection, if any.
@@ -143,7 +135,6 @@ impl InputState {
                 lines.push(VisualLine {
                     byte_start: byte_offset,
                     byte_end: byte_offset,
-                    visual_width: 0,
                 });
                 continue;
             }
@@ -158,7 +149,6 @@ impl InputState {
                     lines.push(VisualLine {
                         byte_start: current_start,
                         byte_end: current_end,
-                        visual_width: current_width as u16,
                     });
                     current_start = current_end;
                     current_width = 0;
@@ -170,7 +160,6 @@ impl InputState {
                 lines.push(VisualLine {
                     byte_start: current_start,
                     byte_end: current_end,
-                    visual_width: current_width as u16,
                 });
             }
             byte_offset += line.len();
@@ -179,7 +168,6 @@ impl InputState {
             lines.push(VisualLine {
                 byte_start: 0,
                 byte_end: 0,
-                visual_width: 0,
             });
         }
         lines
@@ -225,26 +213,22 @@ impl InputState {
     /// Moves the cursor left or right by one grapheme, optionally extending the selection.
     fn move_horizontal(&mut self, delta: i32, shift: bool) {
         self.set_selection(shift);
-        if delta < 0 {
-            if self.cursor_byte_offset > 0 {
-                if let Some((prev_idx, _)) = self
-                    .text
-                    .grapheme_indices(true)
-                    .rev()
-                    .find(|(i, _)| *i < self.cursor_byte_offset)
-                {
-                    self.cursor_byte_offset = prev_idx;
-                }
+        if delta < 0 && self.cursor_byte_offset > 0 {
+            if let Some((prev_idx, _)) = self
+                .text
+                .grapheme_indices(true)
+                .rev()
+                .find(|(i, _)| *i < self.cursor_byte_offset)
+            {
+                self.cursor_byte_offset = prev_idx;
             }
-        } else if delta > 0 {
-            if self.cursor_byte_offset < self.text.len() {
-                if let Some((i, g)) = self
-                    .text
-                    .grapheme_indices(true)
-                    .find(|(i, _)| *i >= self.cursor_byte_offset)
-                {
-                    self.cursor_byte_offset = i + g.len();
-                }
+        } else if delta > 0 && self.cursor_byte_offset < self.text.len() {
+            if let Some((i, g)) = self
+                .text
+                .grapheme_indices(true)
+                .find(|(i, _)| *i >= self.cursor_byte_offset)
+            {
+                self.cursor_byte_offset = i + g.len();
             }
         }
     }

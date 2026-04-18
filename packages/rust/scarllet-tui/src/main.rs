@@ -1,28 +1,50 @@
+//! `scarllet-tui` binary entry point.
+//!
+//! Boots the crossterm event loop, spawns the connection task that
+//! dials core, and pumps `SessionDiff`s into the in-memory [`App`]
+//! mirror. All per-session state lives in core; the TUI is a thin
+//! projection of the diff stream.
+
 mod app;
 mod connection;
 mod events;
 mod git_info;
 mod input;
 mod render;
-mod session;
 mod widgets;
 
 use std::time::Duration;
 
+use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use tokio::sync::mpsc;
 
-use scarllet_proto::proto::*;
+use scarllet_proto::proto::SessionDiff;
 
-use app::{App, ChatEntry, Route};
+use app::{App, CoreCommand, Route};
+
+/// Scarllet TUI command-line arguments.
+#[derive(Parser, Debug, Clone)]
+#[command(name = "scarllet-tui", about = "Scarllet terminal interface")]
+struct Args {
+    /// Attach to an existing session by id instead of auto-creating a new
+    /// one. When the supplied id does not exist on core, the TUI falls
+    /// back to the default auto-create behaviour and surfaces a status
+    /// message informing the user.
+    #[arg(long)]
+    session: Option<String>,
+}
 
 /// Entry point for the Scarllet TUI process.
 ///
 /// Sets up the terminal in raw mode, spawns a background task that connects
 /// to the Core orchestrator via gRPC, then runs the main event loop that
-/// multiplexes Core events and terminal key/paste events until the user quits.
+/// multiplexes session diffs and terminal key/paste events until the user
+/// quits.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         ratatui::restore();
@@ -39,40 +61,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .ok();
 
-    let (event_tx, mut event_rx) = mpsc::channel::<CoreEvent>(256);
-    let (message_tx, message_rx) = mpsc::channel::<TuiMessage>(256);
+    let (diff_tx, mut diff_rx) = mpsc::channel::<SessionDiff>(256);
+    let (command_tx, command_rx) = mpsc::channel::<CoreCommand>(64);
 
+    let requested_session = args.session.clone();
     tokio::spawn(async move {
-        connection::connect_and_stream(event_tx, message_rx).await;
+        connection::connect_and_stream(diff_tx, command_rx, requested_session).await;
     });
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let debug_enabled = std::env::var("SCARLLET_DEBUG")
         .map(|v| v == "true")
         .unwrap_or(false);
-    let session_repo: std::sync::Arc<dyn session::SessionRepository> =
-        match session::FileSessionRepository::new() {
-            Ok(repo) => std::sync::Arc::new(repo),
-            Err(_) => std::sync::Arc::new(session::NullSessionRepository),
-        };
-    let mut app = App::new(message_tx, cwd, debug_enabled, session_repo);
-
-    if let Ok(Some(s)) = app.session_repo.load() {
-        app.load_from_session(s);
-    }
+    let mut app = App::new(command_tx, cwd, debug_enabled);
 
     loop {
         loop {
-            match event_rx.try_recv() {
-                Ok(event) => events::handle_core_event(&mut app, event),
+            match diff_rx.try_recv() {
+                Ok(diff) => events::handle_session_diff(&mut app, diff),
                 Err(mpsc::error::TryRecvError::Disconnected) if !app.stream_closed => {
                     app.stream_closed = true;
-                    if matches!(app.route, Route::Chat) {
-                        app.push_message(ChatEntry::System {
-                            text: "Disconnected from Core.".into(),
-                        });
-                        app.input_locked = false;
-                    }
                 }
                 _ => break,
             }
@@ -127,8 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if key.code == KeyCode::Char('n')
                                 && key.modifiers.contains(KeyModifiers::CONTROL)
                             {
-                                app.save_session();
-                                app.new_session();
+                                let _ = app.command_tx.try_send(CoreCommand::DestroyAndRecreate);
                                 continue;
                             }
                             if events::handle_input(&mut app, key) {
@@ -136,24 +143,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 break;
                             }
                         }
-
                         Event::Paste(text) => {
                             events::handle_paste(&mut app, &text);
                         }
-
-                        // Block any mouse event :D
-                        Event::Mouse(_) => {
-                            continue;
-                        }
+                        Event::Mouse(_) => continue,
                         _ => {}
                     }
                 }
             }
 
             if should_exit {
-                app.save_session();
                 break;
             }
+        }
+
+        // Force chat route once a session is bound, even if Attached arrived
+        // out of band (e.g. on Ctrl-N during the connecting splash).
+        if app.session_id.is_some() && matches!(app.route, Route::Connecting { .. }) {
+            app.route = Route::Chat;
         }
 
         app.advance_tick();

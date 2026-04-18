@@ -70,9 +70,7 @@ fn resolve_packed_ref(git_dir: &Path, ref_path: &str) -> Option<String> {
         if line.starts_with('#') || line.starts_with('^') {
             continue;
         }
-        let mut parts = line.splitn(2, ' ');
-        let sha = parts.next()?;
-        let name = parts.next()?;
+        let (sha, name) = line.split_once(' ')?;
         if name == ref_path {
             return Some(sha.to_string());
         }

@@ -97,8 +97,8 @@ fn restore_line_endings(text: &str, ending: &str) -> String {
 
 /// Splits off the UTF-8 BOM prefix if present, returning `(bom, rest)`.
 fn strip_bom(content: &str) -> (&str, &str) {
-    if content.starts_with('\u{FEFF}') {
-        ("\u{FEFF}", &content[3..])
+    if let Some(stripped) = content.strip_prefix('\u{FEFF}') {
+        ("\u{FEFF}", stripped)
     } else {
         ("", content)
     }
@@ -229,7 +229,7 @@ fn execute(input: EditInput) -> EditOutput {
     // Check if any edit requires fuzzy matching (exact match fails due to whitespace differences)
     let any_fuzzy = edits_normalized
         .iter()
-        .any(|(old_text, _)| normalized.find(old_text.as_str()).is_none());
+        .any(|(old_text, _)| !normalized.contains(old_text.as_str()));
 
     // For fuzzy matching, we need consistent index mapping between content and patterns
     let base_content = if any_fuzzy {

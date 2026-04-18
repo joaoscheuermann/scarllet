@@ -1,31 +1,27 @@
-mod agents;
-mod events;
-mod registry;
-mod routing;
-mod service;
-mod sessions;
-mod tasks;
-mod tools;
-mod watcher;
+//! `scarllet-core` binary entry point.
+//!
+//! Bootstraps the gRPC `Orchestrator` service, the module / config file
+//! watchers, and the process-wide registries (modules, sessions, config)
+//! that every handler reads or mutates. Business logic lives in the
+//! library crate (`src/lib.rs`) which is also consumed by crate-level
+//! integration tests under `tests/`.
 
 use std::net::SocketAddr;
 use std::sync::Mutex;
-use std::time::Instant;
 
-use agents::AgentRegistry;
 use clap::Parser;
-use registry::ModuleRegistry;
+use scarllet_core::registry::ModuleRegistry;
+use scarllet_core::service::OrchestratorService;
+use scarllet_core::session::SessionRegistry;
+use scarllet_core::watcher;
 use scarllet_proto::proto::orchestrator_server::OrchestratorServer;
 use scarllet_sdk::config;
 use scarllet_sdk::lockfile;
-use service::OrchestratorService;
-use sessions::TuiSessionRegistry;
 use std::sync::Arc;
-use tasks::TaskManager;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::TcpListenerStream;
-use tracing::info;
+use tracing::{info, warn};
 
 /// CLI argument definition for the core orchestrator binary.
 #[derive(Parser)]
@@ -39,14 +35,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _cli = Cli::parse();
     tracing_subscriber::fmt::init();
 
-    let started_at = Instant::now();
     let registry = Arc::new(RwLock::new(ModuleRegistry::new()));
-    let task_manager = Arc::new(RwLock::new(TaskManager::new()));
-    let session_registry = Arc::new(RwLock::new(TuiSessionRegistry::new()));
-    let agent_registry = Arc::new(RwLock::new(AgentRegistry::new()));
+    let sessions = Arc::new(RwLock::new(SessionRegistry::new()));
 
     let cfg = config::load().unwrap_or_default();
-    info!("Loaded {} provider(s) from config", cfg.providers.len());
+    info!(
+        "Loaded {} provider(s) from config (default agent: '{}')",
+        cfg.providers.len(),
+        cfg.default_agent
+    );
+    if cfg.default_agent.is_empty() {
+        warn!("no default_agent configured in config.json; prompts will error until set");
+    }
     let config = Arc::new(RwLock::new(cfg));
 
     let dirs = watcher::watched_dirs();
@@ -58,9 +58,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let watcher_config = Arc::clone(&config);
-    let watcher_sessions = Arc::clone(&session_registry);
     tokio::spawn(async move {
-        watcher::watch_config(watcher_config, watcher_sessions).await;
+        watcher::watch_config(watcher_config).await;
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse()?;
@@ -73,13 +72,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     lockfile::write(&bound_addr)?;
 
     let service = OrchestratorService {
-        started_at,
         registry,
         config,
-        task_manager,
-        session_registry,
-        agent_registry,
-        conversation_history: Arc::new(RwLock::new(Vec::new())),
+        sessions,
         bound_addr: bound_addr_str,
     };
 

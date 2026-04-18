@@ -1,5 +1,10 @@
+//! Filesystem watchers: module discovery + config hot-reload.
+//!
+//! Keeps the process-wide [`ModuleRegistry`] and [`ScarlletConfig`] in
+//! sync with on-disk changes. Per AC-9.2 config reloads affect only
+//! future sessions — existing sessions keep their snapshotted config.
+
 use crate::registry::ModuleRegistry;
-use crate::sessions::TuiSessionRegistry;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use scarllet_sdk::config::{self, ScarlletConfig};
 use scarllet_sdk::manifest::ModuleManifest;
@@ -65,7 +70,6 @@ pub async fn run(registry: Arc<RwLock<ModuleRegistry>>, dirs: Vec<PathBuf>) {
         }
     }
 
-    // Initial scan of existing files
     for d in &dirs {
         if let Ok(entries) = std::fs::read_dir(d) {
             for entry in entries.flatten() {
@@ -103,7 +107,6 @@ pub async fn run(registry: Arc<RwLock<ModuleRegistry>>, dirs: Vec<PathBuf>) {
         }
     }
 
-    // Keep watcher alive
     drop(watcher);
 }
 
@@ -149,12 +152,14 @@ async fn probe_manifest(path: &Path) -> Option<ModuleManifest> {
     serde_json::from_slice(&output.stdout).ok()
 }
 
-/// Watches `config.json` for changes and hot-reloads the provider configuration,
-/// broadcasting a `ProviderInfo` event to all connected TUI sessions.
-pub async fn watch_config(
-    config: Arc<RwLock<ScarlletConfig>>,
-    session_registry: Arc<RwLock<TuiSessionRegistry>>,
-) {
+/// Watches `config.json` for changes and hot-reloads the global provider
+/// configuration.
+///
+/// Per AC-9.2 the reload only affects sessions created **after** it lands;
+/// existing sessions keep their snapshotted [`SessionConfig`] and therefore
+/// their provider. The watcher therefore no longer broadcasts to attached
+/// TUIs — broadcast is per-session and lives in `service::session_rpc`.
+pub async fn watch_config(config: Arc<RwLock<ScarlletConfig>>) {
     let config_file = config::config_path();
     let Some(config_dir) = config_file.parent() else {
         warn!("Cannot determine config directory");
@@ -209,11 +214,6 @@ pub async fn watch_config(
                     "Config reloaded: {} provider(s), active='{active}'",
                     provider_count
                 );
-
-                let cfg = config.read().await;
-                let event = crate::events::provider_info(&cfg);
-                drop(cfg);
-                session_registry.read().await.broadcast(event);
             }
             Err(e) => {
                 warn!("Failed to reload config: {e}");
@@ -226,12 +226,10 @@ pub async fn watch_config(
 
 /// Extension trait for human-readable module kind labels in log messages.
 trait ManifestExt {
-    /// Returns a lowercase label like `"tool"`, `"command"`, or `"agent"`.
     fn kind_str(&self) -> &'static str;
 }
 
 impl ManifestExt for ModuleManifest {
-    /// Maps the enum variant to a static string for logging.
     fn kind_str(&self) -> &'static str {
         match self.kind {
             scarllet_sdk::manifest::ModuleKind::Command => "command",
